@@ -359,25 +359,40 @@
 
         // Frelo Stationen von der Nextbike API laden
         // Frelo Stationen von der Nextbike API laden (Verbessert)
+        // Frelo Stationen über einen CORS-Proxy laden
         async function loadFreloStations() {
             try {
-                const res = await fetch(`https://api.nextbike.net/maps/nextbike-live.json?city=${FREIBURG_CITY_ID}`);
+                showStatus("Lade Frelo-Stationen...");
+                
+                // Die originale URL wird durch den CORS-Proxy geleitet
+                const targetUrl = `https://api.nextbike.net/maps/nextbike-live.json?city=${FREIBURG_CITY_ID}`;
+                const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+                
+                const res = await fetch(proxyUrl);
+                
+                if (!res.ok) {
+                    throw new Error(`Server-Fehler: ${res.status}`);
+                }
+        
                 const data = await res.json();
                 
                 if (data.countries) {
-                    // Wir suchen explizit nach der Freiburg-ID, egal wo sie im JSON steht
                     for (let country of data.countries) {
                         let city = country.cities.find(c => c.uid === FREIBURG_CITY_ID);
                         if (city) {
                             freloStations = city.places;
-                            console.log(`${freloStations.length} Frelo Stationen erfolgreich geladen.`);
-                            break;
+                            console.log(`${freloStations.length} Frelo-Stationen geladen.`);
+                            hideStatus();
+                            return;
                         }
                     }
                 }
+                
+                showStatus("Keine Stationen für Freiburg gefunden.", "error");
+        
             } catch (err) {
                 console.error("Fehler beim Laden der Nextbike API:", err);
-                showStatus("Frelo Stationen konnten nicht geladen werden.", "error");
+                showStatus("Fehler beim Laden der Frelo-Daten. Bitte Seite neu laden.", "error");
             }
         }
 

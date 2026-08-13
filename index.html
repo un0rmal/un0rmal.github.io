@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Frelo Mixed-Mode Router</title>
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -80,6 +80,11 @@
             background-color: #0056b3;
         }
 
+        button:disabled {
+            background-color: #a8c7fa;
+            cursor: default;
+        }
+
         button.secondary {
             background-color: #e5e5ea;
             color: #1d1d1f;
@@ -126,6 +131,11 @@
             font-size: 1.4rem;
             font-weight: 700;
             color: #1d1d1f;
+        }
+
+        .summary-value.secondary-value {
+            font-size: 1.1rem;
+            color: #6e6e73;
         }
 
         .etappen-list {
@@ -180,6 +190,14 @@
 
         .nav-btn:active {
             background-color: #28a745;
+        }
+
+        .nav-btn.nav-btn-bike {
+            background-color: #007aff;
+        }
+
+        .nav-btn.nav-btn-bike:active {
+            background-color: #0056b3;
         }
 
         .status-msg {
@@ -274,7 +292,7 @@
             </div>
             <div>
                 <div class="summary-title">Gesamtdistanz</div>
-                <div class="summary-value" id="total-dist" style="font-size: 1.1rem; color: #6e6e73;">-- km</div>
+                <div class="summary-value secondary-value" id="total-dist">-- km</div>
             </div>
         </div>
 
@@ -285,10 +303,10 @@
                     <div class="etappe-icon">🚶 <span>1. Fußweg zur Leihstation</span></div>
                     <span class="badge" id="e1-dist">-- m</span>
                 </div>
-                <div class="etappe-details" id="e1-details">
+                <div class="etappe-details">
                     Station: <strong id="station-a-name">--</strong>
                 </div>
-                <a id="e1-nav-btn" class="nav-btn" target="_blank" href="#">🗺️ In Google Maps öffnen (Fußweg)</a>
+                <a id="e1-nav-btn" class="nav-btn" target="_blank" rel="noopener" href="#">🗺️ In Google Maps öffnen (Fußweg)</a>
             </div>
 
             <!-- Etappe 2 -->
@@ -297,11 +315,11 @@
                     <div class="etappe-icon">🚲 <span>2. Fahrt mit dem Frelo</span></div>
                     <span class="badge badge-green" id="e2-dist">-- km</span>
                 </div>
-                <div class="etappe-details" id="e2-details">
+                <div class="etappe-details">
                     Von: <strong id="e2-from">--</strong><br>
                     Nach: <strong id="e2-to">--</strong> (<span id="station-a-bikes">--</span> Räder frei)
                 </div>
-                <a id="e2-nav-btn" class="nav-btn" target="_blank" href="#" style="background-color: #007aff;">🗺️ In Google Maps öffnen (Radweg)</a>
+                <a id="e2-nav-btn" class="nav-btn nav-btn-bike" target="_blank" rel="noopener" href="#">🗺️ In Google Maps öffnen (Radweg)</a>
             </div>
 
             <!-- Etappe 3 -->
@@ -310,10 +328,11 @@
                     <div class="etappe-icon">🚶 <span>3. Fußweg zum Ziel</span></div>
                     <span class="badge" id="e3-dist">-- m</span>
                 </div>
-                <div class="etappe-details" id="e3-details">
-                    Von Station: <strong id="station-b-name">--</strong> (<span id="station-b-racks">--</span> Plätze frei)
+                <div class="etappe-details">
+                    Von Station: <strong id="station-b-name">--</strong><br>
+                    <span id="station-b-racks">--</span>
                 </div>
-                <a id="e3-nav-btn" class="nav-btn" target="_blank" href="#">🗺️ In Google Maps öffnen (Fußweg)</a>
+                <a id="e3-nav-btn" class="nav-btn" target="_blank" rel="noopener" href="#">🗺️ In Google Maps öffnen (Fußweg)</a>
             </div>
         </div>
     </div>
@@ -321,296 +340,415 @@
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // Freie Routing & Map Engine: OSRM (Open Source Routing Machine) & OSM Nominatim
-        const FREIBURG_CITY_ID = 619;
-        let map, routeLayers = [];
-        let startCoords = null, destCoords = null;
+        "use strict";
+
+        // Freie Routing- & Karten-Engine: OSRM (Routing), OSM Nominatim (Geocoding),
+        // Nextbike Live-API (Frelo-Stationen). Alle Dienste sind kostenlos/öffentlich.
+
+        // ===== Konfiguration =====
+        const CONFIG = {
+            cityId: 619,                        // Freiburg (Frelo) in der Nextbike-API
+            center: [47.9978, 7.8413],          // Kartenmittelpunkt Freiburg
+            zoom: 14,
+            // Bounding-Box um Freiburg (begrenzt die Geocoding-Treffer)
+            bbox: { west: 7.72, south: 47.92, east: 7.95, north: 48.06 },
+            walkSpeedKmh: 5,                    // realistische Geh-Geschwindigkeit
+            bikeSpeedKmh: 15,                   // realistische Rad-Geschwindigkeit
+            minBikesToRent: 1
+        };
+
+        const EARTH_RADIUS_KM = 6371;
+        const GPS_LABEL = "Aktueller Standort (GPS)";
+
+        const ENDPOINTS = {
+            nextbike: cityId => `https://maps.nextbike.net/maps/nextbike-live.json?city=${cityId}`,
+            nominatim: "https://nominatim.openstreetmap.org/search",
+            osrm: "https://router.project-osrm.org/route/v1"
+        };
+
+        // Die Nextbike-Live-API sendet CORS-Header, daher zuerst der Direktabruf.
+        // Fällt dieser aus, dienen die öffentlichen Proxys als Rückfallebene.
+        const DATA_SOURCES = [
+            url => url,
+            url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+            url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`
+        ];
+
+        // Farben & Linienstile (mit den CSS-Klassen abgestimmt)
+        const FOOT_STYLE = { color: "#007aff", weight: 5, dashArray: "8, 8" };
+        const BIKE_STYLE = { color: "#34c759", weight: 6 };
+
+        // ===== Zustand =====
+        let map;
+        let routeLayers = [];
         let freloStations = [];
+        let startCoords = null;
+        let destCoords = null;
+        let usingGps = false;
 
-        // App Initialisieren
-        document.addEventListener('DOMContentLoaded', () => {
-            initMap();
-            loadFreloStations();
+        // ===== Hilfsfunktionen =====
+        const $ = id => document.getElementById(id);
 
-            document.getElementById('route-btn').addEventListener('click', handleRouteCalculation);
-            document.getElementById('gps-btn').addEventListener('click', handleGPSClick);
-        });
+        const gmapsDir = (from, to, mode) =>
+            `https://www.google.com/maps/dir/?api=1&origin=${from.lat},${from.lng}` +
+            `&destination=${to.lat},${to.lng}&travelmode=${mode}`;
 
-        function initMap() {
-            // Karte zentriert auf Freiburg
-            map = L.map('map').setView([47.9978, 7.8413], 14);
+        // OSRM-Demo liefert nur Auto-Zeiten – wir schätzen die Dauer aus der Distanz.
+        const estimateMinutes = (distanceMeters, speedKmh) =>
+            Math.max(1, Math.round((distanceMeters / 1000) / speedKmh * 60));
 
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                maxZoom: 19,
-                attribution: '&copy; OpenStreetMap'
-            }).addTo(map);
-        }
-
-        function showStatus(msg, type = 'info') {
-            const el = document.getElementById('status');
+        function showStatus(msg, type = "info") {
+            const el = $("status");
             el.className = `status-msg ${type}`;
             el.innerText = msg;
-            el.style.display = 'block';
+            el.style.display = "block";
         }
 
         function hideStatus() {
-            document.getElementById('status').style.display = 'none';
+            $("status").style.display = "none";
         }
 
-        // Frelo Stationen von der Nextbike API laden
-        // Frelo Stationen von der Nextbike API laden (Verbessert)
-        // Frelo Stationen über einen CORS-Proxy laden
+        // ===== App-Initialisierung =====
+        document.addEventListener("DOMContentLoaded", () => {
+            initMap();
+            loadFreloStations();
+
+            $("route-btn").addEventListener("click", handleRouteCalculation);
+            $("gps-btn").addEventListener("click", handleGPSClick);
+
+            // Enter-Taste in den Eingabefeldern startet die Berechnung
+            ["start-input", "dest-input"].forEach(id => {
+                $(id).addEventListener("keydown", e => {
+                    if (e.key === "Enter") handleRouteCalculation();
+                });
+            });
+
+            // Manuelle Eingabe hebt den GPS-Modus wieder auf
+            $("start-input").addEventListener("input", () => { usingGps = false; });
+        });
+
+        function initMap() {
+            map = L.map("map").setView(CONFIG.center, CONFIG.zoom);
+            L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+                maxZoom: 19,
+                attribution: "&copy; OpenStreetMap"
+            }).addTo(map);
+        }
+
+        // ===== Datenabruf =====
+
+        // Ruft eine JSON-URL ab und probiert bei Fehlern die nächste Datenquelle.
+        async function fetchJson(url) {
+            for (const wrap of DATA_SOURCES) {
+                try {
+                    const res = await fetch(wrap(url));
+                    if (!res.ok) continue;
+                    return await res.json();
+                } catch (err) {
+                    console.warn("Datenquelle nicht erreichbar, versuche nächste:", err);
+                }
+            }
+            throw new Error("Keine Datenquelle erreichbar");
+        }
+
+        // Frelo-Stationen aus der Nextbike-Live-API laden.
         async function loadFreloStations() {
             try {
                 showStatus("Lade Frelo-Stationen...");
-                
-                // Die originale URL wird durch den CORS-Proxy geleitet
-                const targetUrl = `https://api.nextbike.net/maps/nextbike-live.json?city=${FREIBURG_CITY_ID}`;
-                const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
-                
-                const res = await fetch(proxyUrl);
-                
-                if (!res.ok) {
-                    throw new Error(`Server-Fehler: ${res.status}`);
+                const data = await fetchJson(ENDPOINTS.nextbike(CONFIG.cityId));
+
+                const city = (data.countries || [])
+                    .flatMap(country => country.cities || [])
+                    .find(c => c.uid === CONFIG.cityId);
+
+                if (city) {
+                    freloStations = city.places || [];
+                    console.log(`${freloStations.length} Frelo-Stationen geladen.`);
+                    hideStatus();
+                    return true;
                 }
-        
-                const data = await res.json();
-                
-                if (data.countries) {
-                    for (let country of data.countries) {
-                        let city = country.cities.find(c => c.uid === FREIBURG_CITY_ID);
-                        if (city) {
-                            freloStations = city.places;
-                            console.log(`${freloStations.length} Frelo-Stationen geladen.`);
-                            hideStatus();
-                            return;
-                        }
-                    }
-                }
-                
+
                 showStatus("Keine Stationen für Freiburg gefunden.", "error");
-        
             } catch (err) {
-                console.error("Fehler beim Laden der Nextbike API:", err);
+                console.error("Fehler beim Laden der Nextbike-API:", err);
                 showStatus("Fehler beim Laden der Frelo-Daten. Bitte Seite neu laden.", "error");
             }
+            return false;
         }
 
-        // Geocoding via OpenStreetMap Nominatim (Kostenlos)
+        // Geocoding via OpenStreetMap Nominatim, auf Freiburg begrenzt.
         async function geocode(address) {
-            const query = encodeURIComponent(`${address}, Freiburg`);
-            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${query}&limit=1`);
-            const data = await res.json();
-            if (data && data.length > 0) {
-                return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
-            }
-            return null;
-        }
-
-        // GPS Standort holen
-        function handleGPSClick() {
-            if (navigator.geolocation) {
-                showStatus("Standort wird ermittelt...");
-                navigator.geolocation.getCurrentPosition(
-                    (pos) => {
-                        startCoords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-                        document.getElementById('start-input').value = "Aktueller Standort (GPS)";
-                        hideStatus();
-                    },
-                    (err) => {
-                        showStatus("GPS-Standort konnte nicht ermittelt werden.", "error");
-                    }
-                );
-            } else {
-                showStatus("GPS wird von diesem Browser nicht unterstützt.", "error");
-            }
-        }
-
-        // Haversine Formel zur Entfernungsberechnung (Luftlinie in km)
-        function getDistanceKm(coord1, coord2) {
-            const R = 6371;
-            const dLat = (coord2.lat - coord1.lat) * Math.PI / 180;
-            const dLng = (coord2.lng - coord1.lng) * Math.PI / 180;
-            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                      Math.cos(coord1.lat * Math.PI / 180) * Math.cos(coord2.lat * Math.PI / 180) *
-                      Math.sin(dLng/2) * Math.sin(dLng/2);
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-            return R * c;
-        }
-
-        // Nächstgelegene Station finden
-        // Nächstgelegene Station finden (Angepasst für Frelo Freiburg)
-        function findNearestStation(coords, type = 'bikes') {
-            let bestStation = null;
-            let minDistance = Infinity;
-        
-            freloStations.forEach(st => {
-                let isAvailable = false;
-                
-                if (type === 'bikes') {
-                    // Für den Start: Es MUSS mindestens 1 Rad physisch da sein
-                    isAvailable = (st.bikes > 0);
-                } else {
-                    // Für das Ziel: Es muss lediglich eine offizielle Station sein (spot = true).
-                    // Frelo erlaubt die Rückgabe oft auch ohne leere "free_racks", solange man an der Station ist.
-                    isAvailable = (st.spot === true);
-                }
-        
-                // Wenn die Bedingung erfüllt ist, prüfen wir die Entfernung
-                if (isAvailable) {
-                    const dist = getDistanceKm(coords, { lat: st.lat, lng: st.lng });
-                    if (dist < minDistance) {
-                        minDistance = dist;
-                        bestStation = st;
-                    }
-                }
+            const { west, south, east, north } = CONFIG.bbox;
+            const params = new URLSearchParams({
+                format: "json",
+                q: `${address}, Freiburg`,
+                limit: "1",
+                countrycodes: "de",
+                viewbox: `${west},${north},${east},${south}`,
+                bounded: "1"
             });
-        
-            return bestStation;
-        }
 
-        // OSRM Routing API Aufruf (Foot/Bike)
-        async function fetchOSRMRoute(start, end, profile = 'foot') {
-            const url = `https://router.project-osrm.org/route/v1/${profile}/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`;
-            const res = await fetch(url);
-            const data = await res.json();
-            if (data.routes && data.routes.length > 0) {
-                return data.routes[0];
+            try {
+                const res = await fetch(`${ENDPOINTS.nominatim}?${params}`);
+                if (!res.ok) return null;
+                const data = await res.json();
+                if (Array.isArray(data) && data.length > 0) {
+                    return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+                }
+            } catch (err) {
+                console.error("Geocoding-Fehler:", err);
             }
             return null;
         }
 
-        // Haupt-Logik: Route Berechnen
+        // OSRM-Route für ein Segment (foot/bike) abrufen.
+        async function fetchOSRMRoute(start, end, profile = "foot") {
+            const url = `${ENDPOINTS.osrm}/${profile}/` +
+                `${start.lng},${start.lat};${end.lng},${end.lat}` +
+                `?overview=full&geometries=geojson`;
+            try {
+                const res = await fetch(url);
+                if (!res.ok) return null;
+                const data = await res.json();
+                if (data.routes && data.routes.length > 0) {
+                    return data.routes[0];
+                }
+            } catch (err) {
+                console.error("OSRM-Fehler:", err);
+            }
+            return null;
+        }
+
+        // ===== Standort & Geometrie =====
+
+        function handleGPSClick() {
+            if (!navigator.geolocation) {
+                showStatus("GPS wird von diesem Browser nicht unterstützt.", "error");
+                return;
+            }
+
+            showStatus("Standort wird ermittelt...");
+            navigator.geolocation.getCurrentPosition(
+                pos => {
+                    startCoords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                    usingGps = true;
+                    $("start-input").value = GPS_LABEL;
+                    hideStatus();
+                },
+                () => showStatus("GPS-Standort konnte nicht ermittelt werden.", "error"),
+                { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+            );
+        }
+
+        // Haversine-Formel: Luftlinie in km.
+        function getDistanceKm(a, b) {
+            const dLat = (b.lat - a.lat) * Math.PI / 180;
+            const dLng = (b.lng - a.lng) * Math.PI / 180;
+            const h = Math.sin(dLat / 2) ** 2 +
+                      Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) *
+                      Math.sin(dLng / 2) ** 2;
+            return EARTH_RADIUS_KM * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+        }
+
+        // Anzahl aktuell ausleihbarer Räder einer Station.
+        const rentableBikes = st => st.bikes_available_to_rent ?? st.bikes ?? 0;
+
+        // Nächstgelegene passende Station finden.
+        //   purpose "rent"   -> es muss mindestens ein ausleihbares Rad geben
+        //   purpose "return" -> es muss eine offizielle Station (spot) sein
+        function findNearestStation(coords, purpose) {
+            let best = null;
+            let minDistance = Infinity;
+
+            for (const st of freloStations) {
+                const available = purpose === "rent"
+                    ? rentableBikes(st) >= CONFIG.minBikesToRent
+                    : Boolean(st.spot);
+
+                if (!available) continue;
+
+                const dist = getDistanceKm(coords, { lat: st.lat, lng: st.lng });
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    best = st;
+                }
+            }
+            return best;
+        }
+
+        // ===== Haupt-Logik =====
         async function handleRouteCalculation() {
-            const startVal = document.getElementById('start-input').value.trim();
-            const destVal = document.getElementById('dest-input').value.trim();
+            const btn = $("route-btn");
+            if (btn.disabled) return; // laufende Berechnung nicht doppelt starten
+
+            const startVal = $("start-input").value.trim();
+            const destVal = $("dest-input").value.trim();
 
             if (!destVal) {
                 showStatus("Bitte gib ein Ziel ein.", "error");
                 return;
             }
+            if (!usingGps && !startVal) {
+                showStatus("Bitte gib einen Start ein oder nutze GPS.", "error");
+                return;
+            }
 
+            const originalLabel = btn.innerText;
+            btn.disabled = true;
+            btn.innerText = "Berechne...";
             showStatus("Berechne optimale Frelo-Route...");
 
-            // Startkoordinaten bestimmen
-            if (startVal !== "Aktueller Standort (GPS)" || !startCoords) {
-                startCoords = await geocode(startVal);
+            try {
+                // 1. Start- und Zielkoordinaten bestimmen
+                if (!usingGps) startCoords = await geocode(startVal);
+                destCoords = await geocode(destVal);
+
+                if (!startCoords) {
+                    showStatus("Startadresse konnte nicht gefunden werden.", "error");
+                    return;
+                }
+                if (!destCoords) {
+                    showStatus("Zieladresse konnte nicht gefunden werden.", "error");
+                    return;
+                }
+
+                // 2. Stationsdaten sicherstellen
+                if (freloStations.length === 0 && !(await loadFreloStations())) {
+                    showStatus("Stationsdaten sind nicht verfügbar. Bitte später erneut versuchen.", "error");
+                    return;
+                }
+
+                // 3. Nächste Ausleih- und Rückgabestation suchen
+                const stationA = findNearestStation(startCoords, "rent");
+                const stationB = findNearestStation(destCoords, "return");
+
+                if (!stationA || !stationB) {
+                    showStatus("Keine passenden Frelo-Stationen gefunden.", "error");
+                    return;
+                }
+
+                const sameStation = stationA.uid === stationB.uid;
+                if (sameStation) {
+                    showStatus("Start und Ziel liegen an derselben Station – zu Fuß bist du vermutlich schneller.", "info");
+                }
+
+                const aCoords = { lat: stationA.lat, lng: stationA.lng };
+                const bCoords = { lat: stationB.lat, lng: stationB.lng };
+
+                // 4. Die drei Segmente parallel routen
+                const [route1, route2, route3] = await Promise.all([
+                    fetchOSRMRoute(startCoords, aCoords, "foot"),
+                    fetchOSRMRoute(aCoords, bCoords, "bike"),
+                    fetchOSRMRoute(bCoords, destCoords, "foot")
+                ]);
+
+                if (!route1 || !route2 || !route3) {
+                    showStatus("Route konnte nicht berechnet werden. Bitte erneut versuchen.", "error");
+                    return;
+                }
+
+                if (!sameStation) hideStatus();
+
+                // 5. Karte und Info-Panel aktualisieren
+                const coords = { start: startCoords, a: aCoords, b: bCoords, end: destCoords };
+                renderRoutesOnMap(coords, [route1, route2, route3]);
+                updateUI({
+                    stations: { a: stationA, b: stationB },
+                    routes: [route1, route2, route3],
+                    coords
+                });
+            } catch (err) {
+                console.error("Fehler bei der Routenberechnung:", err);
+                showStatus("Bei der Routenberechnung ist ein Fehler aufgetreten.", "error");
+            } finally {
+                btn.disabled = false;
+                btn.innerText = originalLabel;
             }
-
-            destCoords = await geocode(destVal);
-
-            if (!startCoords || !destCoords) {
-                showStatus("Start oder Ziel konnte nicht gefunden werden.", "error");
-                return;
-            }
-
-            if (freloStations.length === 0) {
-                await loadFreloStations();
-            }
-
-            // 1. Nächste freie Ausleihstation & Rückgabestation suchen
-            const stationA = findNearestStation(startCoords, 'bikes');
-            const stationB = findNearestStation(destCoords, 'racks');
-
-            if (!stationA || !stationB) {
-                showStatus("Keine passenden Frelo-Stationen gefunden.", "error");
-                return;
-            }
-
-            const stationACoords = { lat: stationA.lat, lng: stationA.lng };
-            const stationBCoords = { lat: stationB.lat, lng: stationB.lng };
-
-            // 2. 3 Routing-Segmente berechnen (OSRM)
-            const [route1, route2, route3] = await Promise.all([
-                fetchOSRMRoute(startCoords, stationACoords, 'foot'),
-                fetchOSRMRoute(stationACoords, stationBCoords, 'bike'),
-                fetchOSRMRoute(stationBCoords, destCoords, 'foot')
-            ]);
-
-            if (!route1 || !route2 || !route3) {
-                showStatus("Route konnte nicht berechnet werden.", "error");
-                return;
-            }
-
-            hideStatus();
-
-            // 3. Auf Karte zeichnen & UI aktualisieren
-            renderRoutesOnMap(startCoords, stationACoords, stationBCoords, destCoords, route1, route2, route3);
-            updateUI(stationA, stationB, route1, route2, route3, startCoords, stationACoords, stationBCoords, destCoords);
         }
 
-        // Karte aktualisieren & Polylines zeichnen
-        function renderRoutesOnMap(start, stA, stB, end, r1, r2, r3) {
+        // ===== Karten-Rendering =====
+
+        function makePin(pinClass) {
+            return L.divIcon({
+                className: "leaflet-div-icon",
+                html: `<div class="marker-pin ${pinClass}"></div>`,
+                iconSize: [30, 42],
+                iconAnchor: [15, 42],
+                popupAnchor: [0, -34]
+            });
+        }
+
+        function renderRoutesOnMap(coords, [r1, r2, r3]) {
             // Alte Layer entfernen
             routeLayers.forEach(l => map.removeLayer(l));
             routeLayers = [];
 
-            // Linie 1: Zu Fuß (Gepunktet / Blau)
-            const poly1 = L.geoJSON(r1.geometry, {
-                style: { color: '#007aff', weight: 5, dashArray: '8, 8' }
-            }).addTo(map);
+            const polylines = [
+                L.geoJSON(r1.geometry, { style: FOOT_STYLE }),
+                L.geoJSON(r2.geometry, { style: BIKE_STYLE }),
+                L.geoJSON(r3.geometry, { style: FOOT_STYLE })
+            ];
 
-            // Linie 2: Radfahren (Durchgezogen / Grün)
-            const poly2 = L.geoJSON(r2.geometry, {
-                style: { color: '#34c759', weight: 6 }
-            }).addTo(map);
+            const markers = [
+                L.marker([coords.start.lat, coords.start.lng], { icon: makePin("pin-start") }).bindPopup("<b>Start</b>"),
+                L.marker([coords.a.lat, coords.a.lng], { icon: makePin("pin-station-a") }).bindPopup("<b>Ausleihe</b>"),
+                L.marker([coords.b.lat, coords.b.lng], { icon: makePin("pin-station-b") }).bindPopup("<b>Rückgabe</b>"),
+                L.marker([coords.end.lat, coords.end.lng], { icon: makePin("pin-end") }).bindPopup("<b>Ziel</b>")
+            ];
 
-            // Linie 3: Zu Fuß (Gepunktet / Blau)
-            const poly3 = L.geoJSON(r3.geometry, {
-                style: { color: '#007aff', weight: 5, dashArray: '8, 8' }
-            }).addTo(map);
+            [...polylines, ...markers].forEach(layer => layer.addTo(map));
+            routeLayers = [...polylines, ...markers];
 
-            // Marker erstellen
-            const mStart = L.marker([start.lat, start.lng]).bindPopup("<b>Start</b>").addTo(map);
-            const mStA = L.marker([stA.lat, stA.lng]).bindPopup("<b>Ausleihe:</b> Station A").addTo(map);
-            const mStB = L.marker([stB.lat, stB.lng]).bindPopup("<b>Rückgabe:</b> Station B").addTo(map);
-            const mEnd = L.marker([end.lat, end.lng]).bindPopup("<b>Ziel</b>").addTo(map);
-
-            routeLayers.push(poly1, poly2, poly3, mStart, mStA, mStB, mEnd);
-
-            // Karten-Blickfeld an Route anpassen
-            const bounds = L.featureGroup([poly1, poly2, poly3]).getBounds();
-            map.fitBounds(bounds, { padding: [30, 30] });
+            // Kartenausschnitt an die Route anpassen
+            const bounds = L.featureGroup(polylines).getBounds();
+            if (bounds.isValid()) {
+                map.fitBounds(bounds, { padding: [30, 30] });
+            }
         }
 
-        // UI-Karten & Google Maps Links füllen
-        function updateUI(stA, stB, r1, r2, r3, start, stACoords, stBCoords, end) {
-            const infoPanel = document.getElementById('info-panel');
-            infoPanel.style.display = 'block';
+        // ===== Info-Panel =====
+        function updateUI({ stations, routes, coords }) {
+            const [r1, r2, r3] = routes;
+            const stA = stations.a;
+            const stB = stations.b;
 
-            // Zeiten in Minuten umrechnen
-            const t1 = Math.round(r1.duration / 60);
-            const t2 = Math.round(r2.duration / 60);
-            const t3 = Math.round(r3.duration / 60);
-            const totalMin = t1 + t2 + t3;
+            $("info-panel").style.display = "block";
 
-            const d1 = Math.round(r1.distance); // Meter
-            const d2 = (r2.distance / 1000).toFixed(1); // KM
-            const d3 = Math.round(r3.distance); // Meter
+            // Geschätzte Zeiten (aus der Distanz, da OSRM-Demo nur Auto-Zeiten liefert)
+            const t1 = estimateMinutes(r1.distance, CONFIG.walkSpeedKmh);
+            const t2 = estimateMinutes(r2.distance, CONFIG.bikeSpeedKmh);
+            const t3 = estimateMinutes(r3.distance, CONFIG.walkSpeedKmh);
+
+            const d1 = Math.round(r1.distance);                 // Meter
+            const d2 = (r2.distance / 1000).toFixed(1);         // km
+            const d3 = Math.round(r3.distance);                 // Meter
             const totalKm = ((r1.distance + r2.distance + r3.distance) / 1000).toFixed(1);
 
-            document.getElementById('total-time').innerText = `~${totalMin} min`;
-            document.getElementById('total-dist').innerText = `${totalKm} km`;
+            $("total-time").innerText = `~${t1 + t2 + t3} min`;
+            $("total-dist").innerText = `${totalKm} km`;
 
-            // Details Etappe 1
-            document.getElementById('e1-dist').innerText = `${d1} m (${t1} min)`;
-            document.getElementById('station-a-name').innerText = stA.name;
+            // Etappe 1 – Fußweg zur Leihstation
+            $("e1-dist").innerText = `${d1} m (${t1} min)`;
+            $("station-a-name").innerText = stA.name;
 
-            // Details Etappe 2
-            document.getElementById('e2-dist').innerText = `${d2} km (${t2} min)`;
-            document.getElementById('e2-from').innerText = stA.name;
-            document.getElementById('e2-to').innerText = stB.name;
-            document.getElementById('station-a-bikes').innerText = stA.bikes_available_to_rent || stA.bikes || 0;
+            // Etappe 2 – Fahrt mit dem Frelo
+            $("e2-dist").innerText = `${d2} km (${t2} min)`;
+            $("e2-from").innerText = stA.name;
+            $("e2-to").innerText = stB.name;
+            $("station-a-bikes").innerText = rentableBikes(stA);
 
-            // Details Etappe 3
-            document.getElementById('e3-dist').innerText = `${d3} m (${t3} min)`;
-            document.getElementById('station-b-name').innerText = stB.name;
-            document.getElementById('station-b-racks').innerText = stB.free_racks || "Ja";
+            // Etappe 3 – Fußweg zum Ziel
+            $("e3-dist").innerText = `${d3} m (${t3} min)`;
+            $("station-b-name").innerText = stB.name;
+            const freeRacks = stB.free_racks;
+            $("station-b-racks").innerText = freeRacks > 0
+                ? `${freeRacks} freie Rückgabeplätze`
+                : "Rückgabe möglich";
 
-            // Google Maps Links für jede Etappe setzen
-            document.getElementById('e1-nav-btn').href = `https://www.google.com/maps/dir/?api=1&origin=${start.lat},${start.lng}&destination=${stACoords.lat},${stACoords.lng}&travelmode=walking`;
-            document.getElementById('e2-nav-btn').href = `https://www.google.com/maps/dir/?api=1&origin=${stACoords.lat},${stACoords.lng}&destination=${stBCoords.lat},${stBCoords.lng}&travelmode=bicycling`;
-            document.getElementById('e3-nav-btn').href = `https://www.google.com/maps/dir/?api=1&origin=${stBCoords.lat},${stBCoords.lng}&destination=${end.lat},${end.lng}&travelmode=walking`;
+            // Google-Maps-Navigationslinks je Etappe
+            $("e1-nav-btn").href = gmapsDir(coords.start, coords.a, "walking");
+            $("e2-nav-btn").href = gmapsDir(coords.a, coords.b, "bicycling");
+            $("e3-nav-btn").href = gmapsDir(coords.b, coords.end, "walking");
         }
     </script>
 </body>

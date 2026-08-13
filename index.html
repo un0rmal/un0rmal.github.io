@@ -1,11 +1,475 @@
 <!DOCTYPE html>
 <html lang="de">
- <head>
-  <meta charset="UTF-8"/>
-  <title>Meine Strava App</title>
- </head>
- <body>
-  <h1>Hallo Strava API!</h1>
-  <p>Diese Seite dient als Website-URL für die Strava API Anmeldung.</p>
- </body>
- </html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fuß–Rad–Fuß Routenplaner</title>
+<style>
+  :root{
+    --ink:#16241f;
+    --paper:#f3f1ea;
+    --panel:#ffffff;
+    --line:#d9d4c4;
+    --walk:#2f6f5e;
+    --bike:#c0632b;
+    --muted:#6b6459;
+    --focus:#1a56ff;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0;
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+    background:var(--paper);
+    color:var(--ink);
+    display:flex;
+    flex-direction:column;
+  }
+  header{
+    padding:20px 24px 14px;
+    border-bottom:1px solid var(--line);
+    background:var(--paper);
+  }
+  h1{
+    margin:0 0 4px;
+    font-size:1.35rem;
+    letter-spacing:-0.01em;
+    font-weight:700;
+  }
+  .subtitle{
+    margin:0;
+    color:var(--muted);
+    font-size:0.88rem;
+  }
+  .layout{
+    display:flex;
+    flex:1;
+    min-height:0;
+  }
+  .panel{
+    width:360px;
+    min-width:300px;
+    padding:18px;
+    border-right:1px solid var(--line);
+    overflow-y:auto;
+    background:var(--paper);
+  }
+  .map-wrap{
+    flex:1;
+    position:relative;
+  }
+  #map{
+    position:absolute;
+    inset:0;
+  }
+  fieldset{
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:12px 14px 14px;
+    margin:0 0 14px;
+    background:var(--panel);
+  }
+  legend{
+    font-size:0.72rem;
+    text-transform:uppercase;
+    letter-spacing:0.08em;
+    color:var(--muted);
+    padding:0 6px;
+  }
+  label{
+    display:block;
+    font-size:0.8rem;
+    font-weight:600;
+    margin:8px 0 4px;
+  }
+  label:first-of-type{margin-top:0;}
+  input[type="text"], input[type="password"]{
+    width:100%;
+    padding:8px 10px;
+    border:1px solid var(--line);
+    border-radius:7px;
+    font-size:0.88rem;
+    background:#fff;
+    color:var(--ink);
+  }
+  input:focus{
+    outline:2px solid var(--focus);
+    outline-offset:1px;
+  }
+  .hint{
+    font-size:0.74rem;
+    color:var(--muted);
+    margin-top:6px;
+    line-height:1.4;
+  }
+  button{
+    width:100%;
+    padding:11px;
+    border:none;
+    border-radius:8px;
+    background:var(--ink);
+    color:#fff;
+    font-size:0.92rem;
+    font-weight:600;
+    cursor:pointer;
+    margin-top:4px;
+  }
+  button:disabled{
+    opacity:0.45;
+    cursor:not-allowed;
+  }
+  button.secondary{
+    background:transparent;
+    color:var(--ink);
+    border:1px solid var(--line);
+    font-weight:500;
+  }
+  #status{
+    font-size:0.82rem;
+    margin-top:10px;
+    min-height:1.2em;
+    color:var(--muted);
+  }
+  #status.error{color:#b3261e;}
+
+  /* segmented timeline */
+  .timeline{
+    display:flex;
+    height:10px;
+    border-radius:6px;
+    overflow:hidden;
+    margin:10px 0 10px;
+    border:1px solid var(--line);
+  }
+  .seg{height:100%;}
+  .seg.walk{background:var(--walk);}
+  .seg.bike{background:var(--bike);}
+
+  .legs{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    margin-top:6px;
+  }
+  .leg{
+    display:flex;
+    align-items:flex-start;
+    gap:8px;
+    padding:9px 10px;
+    border-radius:8px;
+    background:var(--panel);
+    border:1px solid var(--line);
+  }
+  .dot{
+    width:9px;height:9px;border-radius:50%;
+    margin-top:5px;flex:none;
+  }
+  .dot.walk{background:var(--walk);}
+  .dot.bike{background:var(--bike);}
+  .leg-body{flex:1;}
+  .leg-title{
+    font-size:0.82rem;
+    font-weight:700;
+  }
+  .leg-detail{
+    font-size:0.78rem;
+    color:var(--muted);
+    margin-top:1px;
+  }
+  .total{
+    margin-top:12px;
+    padding-top:10px;
+    border-top:1px dashed var(--line);
+    font-size:0.9rem;
+    font-weight:700;
+    display:flex;
+    justify-content:space-between;
+  }
+  .leg-open{
+    display:inline-flex;
+    align-items:center;
+    gap:5px;
+    margin-top:7px;
+    padding:5px 10px;
+    border-radius:6px;
+    border:1px solid var(--line);
+    background:var(--paper);
+    color:var(--ink);
+    font-size:0.74rem;
+    font-weight:600;
+    text-decoration:none;
+  }
+  .leg-open:active{
+    background:var(--line);
+  }
+  .leg-open svg{width:12px;height:12px;flex:none;}
+  .maps-hint{
+    font-size:0.74rem;
+    color:var(--muted);
+    margin:10px 0 0;
+    line-height:1.4;
+  }
+  .keybox{
+    display:flex;
+    gap:8px;
+  }
+  .keybox input{flex:1;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Fuß – Rad – Fuß Routenplaner</h1>
+  <p class="subtitle">Start → Leihstation → Leihstation am Ziel → Ziel</p>
+</header>
+
+<div class="layout">
+  <div class="panel">
+
+    <fieldset>
+      <legend>Google Maps API-Key</legend>
+      <label for="apiKey">API-Key (Directions + Places API aktiviert)</label>
+      <div class="keybox">
+        <input type="password" id="apiKey" placeholder="AIza..." autocomplete="off">
+        <button class="secondary" id="loadKeyBtn" style="width:auto;">Laden</button>
+      </div>
+      <p class="hint">Dein Key wird nur im Browser-Speicher dieser Sitzung verwendet, nirgendwo gespeichert oder übertragen. Erstelle einen Key in der <a href="https://console.cloud.google.com/google/maps-apis/credentials" target="_blank" rel="noopener">Google Cloud Console</a> und aktiviere dort „Directions API" und „Places API".</p>
+    </fieldset>
+
+    <fieldset id="routeFields" disabled>
+      <legend>Route</legend>
+
+      <label for="start">Start</label>
+      <input type="text" id="start" placeholder="z. B. Hauptbahnhof Freiburg">
+
+      <label for="station1">Fahrrad-Station bei Start</label>
+      <input type="text" id="station1" placeholder="Adresse oder Station manuell eintragen">
+
+      <label for="station2">Fahrrad-Station beim Ziel</label>
+      <input type="text" id="station2" placeholder="Adresse oder Station manuell eintragen">
+
+      <label for="end">Ziel</label>
+      <input type="text" id="end" placeholder="z. B. Freiburger Münster">
+
+      <button id="calcBtn">Route berechnen</button>
+      <div id="status"></div>
+    </fieldset>
+
+    <div id="resultsBox" style="display:none;">
+      <fieldset>
+        <legend>Zusammenfassung</legend>
+        <div class="timeline" id="timeline"></div>
+        <div class="legs" id="legs"></div>
+        <div class="total" id="total"></div>
+        <p class="maps-hint" id="mapsHint"></p>
+      </fieldset>
+    </div>
+
+  </div>
+
+  <div class="map-wrap">
+    <div id="map"></div>
+  </div>
+</div>
+
+<script>
+let map, directionsService;
+const renderers = [];
+const legColors = ['walk','bike','walk'];
+const legLabels = ['Zu Fuß zur Station', 'Mit dem Rad', 'Zu Fuß zum Ziel'];
+
+function setStatus(msg, isError){
+  const el = document.getElementById('status');
+  el.textContent = msg || '';
+  el.className = isError ? 'error' : '';
+}
+
+function initMapCore(){
+  map = new google.maps.Map(document.getElementById('map'), {
+    center: {lat: 47.9990, lng: 7.8421}, // Freiburg als Default
+    zoom: 13,
+    mapTypeControl:false,
+    streetViewControl:false,
+  });
+  directionsService = new google.maps.DirectionsService();
+
+  // Places Autocomplete für alle vier Felder, sofern Places API geladen ist
+  ['start','station1','station2','end'].forEach(id => {
+    const input = document.getElementById(id);
+    try {
+      new google.maps.places.Autocomplete(input);
+    } catch(e){ /* Places evtl. nicht aktiviert - Adresssuche funktioniert trotzdem über Geocoding */ }
+  });
+
+  document.getElementById('routeFields').disabled = false;
+  setStatus('');
+}
+
+function loadGoogleMaps(){
+  const key = document.getElementById('apiKey').value.trim();
+  if(!key){
+    setStatus('Bitte zuerst einen API-Key eingeben.', true);
+    return;
+  }
+  document.getElementById('loadKeyBtn').disabled = true;
+  document.getElementById('loadKeyBtn').textContent = 'Lädt…';
+
+  window.__gmapsReady = initMapCore;
+  const script = document.createElement('script');
+  script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&libraries=places&callback=__gmapsReady`;
+  script.async = true;
+  script.onerror = () => setStatus('Google Maps konnte nicht geladen werden. Key prüfen.', true);
+  document.head.appendChild(script);
+}
+
+function clearRenderers(){
+  renderers.forEach(r => r.setMap(null));
+  renderers.length = 0;
+}
+
+function routeLeg(origin, destination, travelMode){
+  return new Promise((resolve, reject) => {
+    directionsService.route({
+      origin, destination, travelMode,
+      provideRouteAlternatives:false
+    }, (result, status) => {
+      if(status === 'OK'){
+        resolve(result);
+      } else {
+        reject(new Error(`${travelMode}: ${status}`));
+      }
+    });
+  });
+}
+
+function fmtDuration(sec){
+  const min = Math.round(sec/60);
+  if(min < 60) return `${min} Min.`;
+  const h = Math.floor(min/60), m = min%60;
+  return m ? `${h} Std. ${m} Min.` : `${h} Std.`;
+}
+function fmtDistance(m){
+  return m >= 1000 ? `${(m/1000).toFixed(1)} km` : `${m} m`;
+}
+
+async function calculateRoute(){
+  const start = document.getElementById('start').value.trim();
+  const station1 = document.getElementById('station1').value.trim();
+  const station2 = document.getElementById('station2').value.trim();
+  const end = document.getElementById('end').value.trim();
+
+  if(!start || !station1 || !station2 || !end){
+    setStatus('Bitte alle vier Felder ausfüllen.', true);
+    return;
+  }
+
+  document.getElementById('calcBtn').disabled = true;
+  setStatus('Berechne Route…');
+  clearRenderers();
+  document.getElementById('resultsBox').style.display = 'none';
+
+  try{
+    const [legWalk1, legBike, legWalk2] = await Promise.all([
+      routeLeg(start, station1, google.maps.TravelMode.WALKING),
+      routeLeg(station1, station2, google.maps.TravelMode.BICYCLING),
+      routeLeg(station2, end, google.maps.TravelMode.WALKING),
+    ]);
+
+    const results = [legWalk1, legBike, legWalk2];
+    const bounds = new google.maps.LatLngBounds();
+
+    results.forEach((res, i) => {
+      const renderer = new google.maps.DirectionsRenderer({
+        map,
+        directions: res,
+        suppressMarkers: false,
+        polylineOptions: {
+          strokeColor: legColors[i] === 'walk' ? '#2f6f5e' : '#c0632b',
+          strokeWeight: 5,
+          strokeOpacity: legColors[i] === 'walk' ? 0.75 : 0.9,
+        }
+      });
+      renderers.push(renderer);
+      res.routes[0].legs.forEach(l => {
+        bounds.extend(l.start_location);
+        bounds.extend(l.end_location);
+      });
+    });
+    map.fitBounds(bounds, 60);
+
+    renderResults(results, [start, station1, station2, end]);
+    setStatus('');
+  } catch(err){
+    console.error(err);
+    setStatus('Route konnte nicht berechnet werden: ' + err.message, true);
+  } finally {
+    document.getElementById('calcBtn').disabled = false;
+  }
+}
+
+// Google Maps "travelmode" Werte für den Universal-Link (öffnet auf iOS/Android
+// automatisch die installierte App, sonst die Webseite)
+const legTravelMode = ['walking','bicycling','walking'];
+
+function googleMapsUrl(origin, destination, travelmode){
+  const params = new URLSearchParams({
+    api: '1',
+    origin,
+    destination,
+    travelmode,
+  });
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
+const compassIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/></svg>`;
+
+function renderResults(results, addresses){
+  const legsData = results.map(r => r.routes[0].legs[0]);
+  const durations = legsData.map(l => l.duration.value);
+  const distances = legsData.map(l => l.distance.value);
+  const totalDuration = durations.reduce((a,b)=>a+b,0);
+  const totalDistance = distances.reduce((a,b)=>a+b,0);
+
+  const timeline = document.getElementById('timeline');
+  timeline.innerHTML = '';
+  durations.forEach((d,i) => {
+    const seg = document.createElement('div');
+    seg.className = `seg ${legColors[i]}`;
+    seg.style.width = `${(d/totalDuration*100).toFixed(1)}%`;
+    timeline.appendChild(seg);
+  });
+
+  const legsBox = document.getElementById('legs');
+  legsBox.innerHTML = '';
+  legsData.forEach((l, i) => {
+    const url = googleMapsUrl(addresses[i], addresses[i+1], legTravelMode[i]);
+    const div = document.createElement('div');
+    div.className = 'leg';
+    div.innerHTML = `
+      <div class="dot ${legColors[i]}"></div>
+      <div class="leg-body">
+        <div class="leg-title">${legLabels[i]}</div>
+        <div class="leg-detail">${fmtDistance(l.distance.value)} · ${fmtDuration(l.duration.value)}</div>
+        <a class="leg-open" href="${url}" target="_blank" rel="noopener">${compassIcon} In Google Maps öffnen</a>
+      </div>`;
+    legsBox.appendChild(div);
+  });
+
+  document.getElementById('total').innerHTML =
+    `<span>Gesamt</span><span>${fmtDistance(totalDistance)} · ${fmtDuration(totalDuration)}</span>`;
+
+  document.getElementById('resultsBox').style.display = 'block';
+
+  const hint = document.getElementById('mapsHint');
+  hint.textContent = 'Jeder Button öffnet die jeweilige Etappe mit Navigation in der Google Maps App (falls installiert), sonst im Browser. Da Google Maps keine App-übergreifende 3-Etappen-Route mit unterschiedlichen Verkehrsmitteln unterstützt, muss jede Etappe einzeln gestartet werden.';
+}
+
+document.getElementById('loadKeyBtn').addEventListener('click', loadGoogleMaps);
+document.getElementById('calcBtn').addEventListener('click', calculateRoute);
+document.getElementById('apiKey').addEventListener('keydown', e => {
+  if(e.key === 'Enter') loadGoogleMaps();
+});
+</script>
+
+</body>
+</html>

@@ -1,475 +1,583 @@
 <!DOCTYPE html>
 <html lang="de">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Fuß–Rad–Fuß Routenplaner</title>
-<style>
-  :root{
-    --ink:#16241f;
-    --paper:#f3f1ea;
-    --panel:#ffffff;
-    --line:#d9d4c4;
-    --walk:#2f6f5e;
-    --bike:#c0632b;
-    --muted:#6b6459;
-    --focus:#1a56ff;
-  }
-  *{box-sizing:border-box;}
-  html,body{height:100%;}
-  body{
-    margin:0;
-    font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
-    background:var(--paper);
-    color:var(--ink);
-    display:flex;
-    flex-direction:column;
-  }
-  header{
-    padding:20px 24px 14px;
-    border-bottom:1px solid var(--line);
-    background:var(--paper);
-  }
-  h1{
-    margin:0 0 4px;
-    font-size:1.35rem;
-    letter-spacing:-0.01em;
-    font-weight:700;
-  }
-  .subtitle{
-    margin:0;
-    color:var(--muted);
-    font-size:0.88rem;
-  }
-  .layout{
-    display:flex;
-    flex:1;
-    min-height:0;
-  }
-  .panel{
-    width:360px;
-    min-width:300px;
-    padding:18px;
-    border-right:1px solid var(--line);
-    overflow-y:auto;
-    background:var(--paper);
-  }
-  .map-wrap{
-    flex:1;
-    position:relative;
-  }
-  #map{
-    position:absolute;
-    inset:0;
-  }
-  fieldset{
-    border:1px solid var(--line);
-    border-radius:10px;
-    padding:12px 14px 14px;
-    margin:0 0 14px;
-    background:var(--panel);
-  }
-  legend{
-    font-size:0.72rem;
-    text-transform:uppercase;
-    letter-spacing:0.08em;
-    color:var(--muted);
-    padding:0 6px;
-  }
-  label{
-    display:block;
-    font-size:0.8rem;
-    font-weight:600;
-    margin:8px 0 4px;
-  }
-  label:first-of-type{margin-top:0;}
-  input[type="text"], input[type="password"]{
-    width:100%;
-    padding:8px 10px;
-    border:1px solid var(--line);
-    border-radius:7px;
-    font-size:0.88rem;
-    background:#fff;
-    color:var(--ink);
-  }
-  input:focus{
-    outline:2px solid var(--focus);
-    outline-offset:1px;
-  }
-  .hint{
-    font-size:0.74rem;
-    color:var(--muted);
-    margin-top:6px;
-    line-height:1.4;
-  }
-  button{
-    width:100%;
-    padding:11px;
-    border:none;
-    border-radius:8px;
-    background:var(--ink);
-    color:#fff;
-    font-size:0.92rem;
-    font-weight:600;
-    cursor:pointer;
-    margin-top:4px;
-  }
-  button:disabled{
-    opacity:0.45;
-    cursor:not-allowed;
-  }
-  button.secondary{
-    background:transparent;
-    color:var(--ink);
-    border:1px solid var(--line);
-    font-weight:500;
-  }
-  #status{
-    font-size:0.82rem;
-    margin-top:10px;
-    min-height:1.2em;
-    color:var(--muted);
-  }
-  #status.error{color:#b3261e;}
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Frelo Mixed-Mode Router</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
 
-  /* segmented timeline */
-  .timeline{
-    display:flex;
-    height:10px;
-    border-radius:6px;
-    overflow:hidden;
-    margin:10px 0 10px;
-    border:1px solid var(--line);
-  }
-  .seg{height:100%;}
-  .seg.walk{background:var(--walk);}
-  .seg.bike{background:var(--bike);}
+        body {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            background-color: #f5f5f7;
+            color: #1d1d1f;
+        }
 
-  .legs{
-    display:flex;
-    flex-direction:column;
-    gap:8px;
-    margin-top:6px;
-  }
-  .leg{
-    display:flex;
-    align-items:flex-start;
-    gap:8px;
-    padding:9px 10px;
-    border-radius:8px;
-    background:var(--panel);
-    border:1px solid var(--line);
-  }
-  .dot{
-    width:9px;height:9px;border-radius:50%;
-    margin-top:5px;flex:none;
-  }
-  .dot.walk{background:var(--walk);}
-  .dot.bike{background:var(--bike);}
-  .leg-body{flex:1;}
-  .leg-title{
-    font-size:0.82rem;
-    font-weight:700;
-  }
-  .leg-detail{
-    font-size:0.78rem;
-    color:var(--muted);
-    margin-top:1px;
-  }
-  .total{
-    margin-top:12px;
-    padding-top:10px;
-    border-top:1px dashed var(--line);
-    font-size:0.9rem;
-    font-weight:700;
-    display:flex;
-    justify-content:space-between;
-  }
-  .leg-open{
-    display:inline-flex;
-    align-items:center;
-    gap:5px;
-    margin-top:7px;
-    padding:5px 10px;
-    border-radius:6px;
-    border:1px solid var(--line);
-    background:var(--paper);
-    color:var(--ink);
-    font-size:0.74rem;
-    font-weight:600;
-    text-decoration:none;
-  }
-  .leg-open:active{
-    background:var(--line);
-  }
-  .leg-open svg{width:12px;height:12px;flex:none;}
-  .maps-hint{
-    font-size:0.74rem;
-    color:var(--muted);
-    margin:10px 0 0;
-    line-height:1.4;
-  }
-  .keybox{
-    display:flex;
-    gap:8px;
-  }
-  .keybox input{flex:1;}
-</style>
+        #header {
+            background: #ffffff;
+            padding: 16px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            z-index: 1000;
+        }
+
+        h1 {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #2c3e50;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .input-row {
+            display: flex;
+            gap: 8px;
+        }
+
+        input {
+            flex: 1;
+            padding: 10px 12px;
+            border: 1px solid #dcdce0;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        input:focus {
+            border-color: #007aff;
+        }
+
+        button {
+            background-color: #007aff;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        button:active {
+            background-color: #0056b3;
+        }
+
+        button.secondary {
+            background-color: #e5e5ea;
+            color: #1d1d1f;
+            padding: 10px;
+        }
+
+        #map {
+            flex: 1;
+            width: 100%;
+            z-index: 1;
+        }
+
+        #info-panel {
+            background: #ffffff;
+            border-top-left-radius: 16px;
+            border-top-right-radius: 16px;
+            padding: 16px;
+            box-shadow: 0 -4px 16px rgba(0,0,0,0.1);
+            z-index: 1000;
+            max-height: 45vh;
+            overflow-y: auto;
+            display: none;
+        }
+
+        .summary-card {
+            background: #f0f7ff;
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .summary-title {
+            font-size: 0.85rem;
+            color: #007aff;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .summary-value {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: #1d1d1f;
+        }
+
+        .etappen-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .etappe-item {
+            border: 1px solid #e5e5ea;
+            border-radius: 10px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            background: #fff;
+        }
+
+        .etappe-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+
+        .etappe-icon {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .etappe-details {
+            font-size: 0.85rem;
+            color: #6e6e73;
+        }
+
+        .nav-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            background-color: #34c759;
+            color: white;
+            text-decoration: none;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-top: 4px;
+        }
+
+        .nav-btn:active {
+            background-color: #28a745;
+        }
+
+        .status-msg {
+            padding: 8px 12px;
+            font-size: 0.85rem;
+            border-radius: 6px;
+            margin-top: 8px;
+            display: none;
+        }
+
+        .status-msg.error {
+            background-color: #ffe5e5;
+            color: #d32f2f;
+        }
+
+        .status-msg.info {
+            background-color: #e3f2fd;
+            color: #0288d1;
+        }
+
+        /* Custom Marker Icons */
+        .leaflet-div-icon {
+            background: transparent;
+            border: none;
+        }
+
+        .marker-pin {
+            width: 30px;
+            height: 30px;
+            border-radius: 50% 50% 50% 0;
+            position: absolute;
+            transform: rotate(-45deg);
+            left: 50%;
+            top: 50%;
+            margin: -20px 0 0 -15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        }
+
+        .marker-pin::after {
+            content: '';
+            width: 14px;
+            height: 14px;
+            margin: 8px 0 0 8px;
+            background: #fff;
+            position: absolute;
+            border-radius: 50%;
+        }
+
+        .pin-start { background: #007aff; }
+        .pin-station-a { background: #ff9500; }
+        .pin-station-b { background: #af52de; }
+        .pin-end { background: #ff3b30; }
+
+        .badge {
+            font-size: 0.75rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: #e5e5ea;
+            color: #333;
+        }
+        .badge-green { background: #e2f8e5; color: #1e7e34; }
+        .badge-purple { background: #f3e8ff; color: #6b21a8; }
+    </style>
 </head>
 <body>
 
-<header>
-  <h1>Fuß – Rad – Fuß Routenplaner</h1>
-  <p class="subtitle">Start → Leihstation → Leihstation am Ziel → Ziel</p>
-</header>
-
-<div class="layout">
-  <div class="panel">
-
-    <fieldset>
-      <legend>Google Maps API-Key</legend>
-      <label for="apiKey">API-Key (Directions + Places API aktiviert)</label>
-      <div class="keybox">
-        <input type="password" id="apiKey" placeholder="AIza..." autocomplete="off">
-        <button class="secondary" id="loadKeyBtn" style="width:auto;">Laden</button>
-      </div>
-      <p class="hint">Dein Key wird nur im Browser-Speicher dieser Sitzung verwendet, nirgendwo gespeichert oder übertragen. Erstelle einen Key in der <a href="https://console.cloud.google.com/google/maps-apis/credentials" target="_blank" rel="noopener">Google Cloud Console</a> und aktiviere dort „Directions API" und „Places API".</p>
-    </fieldset>
-
-    <fieldset id="routeFields" disabled>
-      <legend>Route</legend>
-
-      <label for="start">Start</label>
-      <input type="text" id="start" placeholder="z. B. Hauptbahnhof Freiburg">
-
-      <label for="station1">Fahrrad-Station bei Start</label>
-      <input type="text" id="station1" placeholder="Adresse oder Station manuell eintragen">
-
-      <label for="station2">Fahrrad-Station beim Ziel</label>
-      <input type="text" id="station2" placeholder="Adresse oder Station manuell eintragen">
-
-      <label for="end">Ziel</label>
-      <input type="text" id="end" placeholder="z. B. Freiburger Münster">
-
-      <button id="calcBtn">Route berechnen</button>
-      <div id="status"></div>
-    </fieldset>
-
-    <div id="resultsBox" style="display:none;">
-      <fieldset>
-        <legend>Zusammenfassung</legend>
-        <div class="timeline" id="timeline"></div>
-        <div class="legs" id="legs"></div>
-        <div class="total" id="total"></div>
-        <p class="maps-hint" id="mapsHint"></p>
-      </fieldset>
+    <div id="header">
+        <h1>🚲 Frelo Mixed-Mode Router</h1>
+        <div class="input-group">
+            <div class="input-row">
+                <input type="text" id="start-input" placeholder="Startadresse in Freiburg (oder GPS nutzen)...">
+                <button class="secondary" id="gps-btn" title="Aktuellen Standort nutzen">📍</button>
+            </div>
+            <div class="input-row">
+                <input type="text" id="dest-input" placeholder="Zieladresse in Freiburg...">
+                <button id="route-btn">Route berechnen</button>
+            </div>
+        </div>
+        <div id="status" class="status-msg"></div>
     </div>
 
-  </div>
-
-  <div class="map-wrap">
     <div id="map"></div>
-  </div>
-</div>
 
-<script>
-let map, directionsService;
-const renderers = [];
-const legColors = ['walk','bike','walk'];
-const legLabels = ['Zu Fuß zur Station', 'Mit dem Rad', 'Zu Fuß zum Ziel'];
+    <div id="info-panel">
+        <div class="summary-card">
+            <div>
+                <div class="summary-title">Gesamtzeit (geschätzt)</div>
+                <div class="summary-value" id="total-time">-- min</div>
+            </div>
+            <div>
+                <div class="summary-title">Gesamtdistanz</div>
+                <div class="summary-value" id="total-dist" style="font-size: 1.1rem; color: #6e6e73;">-- km</div>
+            </div>
+        </div>
 
-function setStatus(msg, isError){
-  const el = document.getElementById('status');
-  el.textContent = msg || '';
-  el.className = isError ? 'error' : '';
-}
+        <div class="etappen-list">
+            <!-- Etappe 1 -->
+            <div class="etappe-item">
+                <div class="etappe-header">
+                    <div class="etappe-icon">🚶 <span>1. Fußweg zur Leihstation</span></div>
+                    <span class="badge" id="e1-dist">-- m</span>
+                </div>
+                <div class="etappe-details" id="e1-details">
+                    Station: <strong id="station-a-name">--</strong>
+                </div>
+                <a id="e1-nav-btn" class="nav-btn" target="_blank" href="#">🗺️ In Google Maps öffnen (Fußweg)</a>
+            </div>
 
-function initMapCore(){
-  map = new google.maps.Map(document.getElementById('map'), {
-    center: {lat: 47.9990, lng: 7.8421}, // Freiburg als Default
-    zoom: 13,
-    mapTypeControl:false,
-    streetViewControl:false,
-  });
-  directionsService = new google.maps.DirectionsService();
+            <!-- Etappe 2 -->
+            <div class="etappe-item">
+                <div class="etappe-header">
+                    <div class="etappe-icon">🚲 <span>2. Fahrt mit dem Frelo</span></div>
+                    <span class="badge badge-green" id="e2-dist">-- km</span>
+                </div>
+                <div class="etappe-details" id="e2-details">
+                    Von: <strong id="e2-from">--</strong><br>
+                    Nach: <strong id="e2-to">--</strong> (<span id="station-a-bikes">--</span> Räder frei)
+                </div>
+                <a id="e2-nav-btn" class="nav-btn" target="_blank" href="#" style="background-color: #007aff;">🗺️ In Google Maps öffnen (Radweg)</a>
+            </div>
 
-  // Places Autocomplete für alle vier Felder, sofern Places API geladen ist
-  ['start','station1','station2','end'].forEach(id => {
-    const input = document.getElementById(id);
-    try {
-      new google.maps.places.Autocomplete(input);
-    } catch(e){ /* Places evtl. nicht aktiviert - Adresssuche funktioniert trotzdem über Geocoding */ }
-  });
+            <!-- Etappe 3 -->
+            <div class="etappe-item">
+                <div class="etappe-header">
+                    <div class="etappe-icon">🚶 <span>3. Fußweg zum Ziel</span></div>
+                    <span class="badge" id="e3-dist">-- m</span>
+                </div>
+                <div class="etappe-details" id="e3-details">
+                    Von Station: <strong id="station-b-name">--</strong> (<span id="station-b-racks">--</span> Plätze frei)
+                </div>
+                <a id="e3-nav-btn" class="nav-btn" target="_blank" href="#">🗺️ In Google Maps öffnen (Fußweg)</a>
+            </div>
+        </div>
+    </div>
 
-  document.getElementById('routeFields').disabled = false;
-  setStatus('');
-}
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Freie Routing & Map Engine: OSRM (Open Source Routing Machine) & OSM Nominatim
+        const FREIBURG_CITY_ID = 619;
+        let map, routeLayers = [];
+        let startCoords = null, destCoords = null;
+        let freloStations = [];
 
-function loadGoogleMaps(){
-  const key = document.getElementById('apiKey').value.trim();
-  if(!key){
-    setStatus('Bitte zuerst einen API-Key eingeben.', true);
-    return;
-  }
-  document.getElementById('loadKeyBtn').disabled = true;
-  document.getElementById('loadKeyBtn').textContent = 'Lädt…';
+        // App Initialisieren
+        document.addEventListener('DOMContentLoaded', () => {
+            initMap();
+            loadFreloStations();
 
-  window.__gmapsReady = initMapCore;
-  const script = document.createElement('script');
-  script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&libraries=places&callback=__gmapsReady`;
-  script.async = true;
-  script.onerror = () => setStatus('Google Maps konnte nicht geladen werden. Key prüfen.', true);
-  document.head.appendChild(script);
-}
+            document.getElementById('route-btn').addEventListener('click', handleRouteCalculation);
+            document.getElementById('gps-btn').addEventListener('click', handleGPSClick);
+        });
 
-function clearRenderers(){
-  renderers.forEach(r => r.setMap(null));
-  renderers.length = 0;
-}
+        function initMap() {
+            // Karte zentriert auf Freiburg
+            map = L.map('map').setView([47.9978, 7.8413], 14);
 
-function routeLeg(origin, destination, travelMode){
-  return new Promise((resolve, reject) => {
-    directionsService.route({
-      origin, destination, travelMode,
-      provideRouteAlternatives:false
-    }, (result, status) => {
-      if(status === 'OK'){
-        resolve(result);
-      } else {
-        reject(new Error(`${travelMode}: ${status}`));
-      }
-    });
-  });
-}
-
-function fmtDuration(sec){
-  const min = Math.round(sec/60);
-  if(min < 60) return `${min} Min.`;
-  const h = Math.floor(min/60), m = min%60;
-  return m ? `${h} Std. ${m} Min.` : `${h} Std.`;
-}
-function fmtDistance(m){
-  return m >= 1000 ? `${(m/1000).toFixed(1)} km` : `${m} m`;
-}
-
-async function calculateRoute(){
-  const start = document.getElementById('start').value.trim();
-  const station1 = document.getElementById('station1').value.trim();
-  const station2 = document.getElementById('station2').value.trim();
-  const end = document.getElementById('end').value.trim();
-
-  if(!start || !station1 || !station2 || !end){
-    setStatus('Bitte alle vier Felder ausfüllen.', true);
-    return;
-  }
-
-  document.getElementById('calcBtn').disabled = true;
-  setStatus('Berechne Route…');
-  clearRenderers();
-  document.getElementById('resultsBox').style.display = 'none';
-
-  try{
-    const [legWalk1, legBike, legWalk2] = await Promise.all([
-      routeLeg(start, station1, google.maps.TravelMode.WALKING),
-      routeLeg(station1, station2, google.maps.TravelMode.BICYCLING),
-      routeLeg(station2, end, google.maps.TravelMode.WALKING),
-    ]);
-
-    const results = [legWalk1, legBike, legWalk2];
-    const bounds = new google.maps.LatLngBounds();
-
-    results.forEach((res, i) => {
-      const renderer = new google.maps.DirectionsRenderer({
-        map,
-        directions: res,
-        suppressMarkers: false,
-        polylineOptions: {
-          strokeColor: legColors[i] === 'walk' ? '#2f6f5e' : '#c0632b',
-          strokeWeight: 5,
-          strokeOpacity: legColors[i] === 'walk' ? 0.75 : 0.9,
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; OpenStreetMap'
+            }).addTo(map);
         }
-      });
-      renderers.push(renderer);
-      res.routes[0].legs.forEach(l => {
-        bounds.extend(l.start_location);
-        bounds.extend(l.end_location);
-      });
-    });
-    map.fitBounds(bounds, 60);
 
-    renderResults(results, [start, station1, station2, end]);
-    setStatus('');
-  } catch(err){
-    console.error(err);
-    setStatus('Route konnte nicht berechnet werden: ' + err.message, true);
-  } finally {
-    document.getElementById('calcBtn').disabled = false;
-  }
-}
+        function showStatus(msg, type = 'info') {
+            const el = document.getElementById('status');
+            el.className = `status-msg ${type}`;
+            el.innerText = msg;
+            el.style.display = 'block';
+        }
 
-// Google Maps "travelmode" Werte für den Universal-Link (öffnet auf iOS/Android
-// automatisch die installierte App, sonst die Webseite)
-const legTravelMode = ['walking','bicycling','walking'];
+        function hideStatus() {
+            document.getElementById('status').style.display = 'none';
+        }
 
-function googleMapsUrl(origin, destination, travelmode){
-  const params = new URLSearchParams({
-    api: '1',
-    origin,
-    destination,
-    travelmode,
-  });
-  return `https://www.google.com/maps/dir/?${params.toString()}`;
-}
+        // Frelo Stationen von der Nextbike API laden
+        async function loadFreloStations() {
+            try {
+                const res = await fetch(`https://api.nextbike.net/maps/nextbike-live.json?city=${FREIBURG_CITY_ID}`);
+                const data = await res.json();
+                
+                if (data.countries && data.countries[0] && data.countries[0].cities[0]) {
+                    freloStations = data.countries[0].cities[0].places;
+                    console.log(`${freloStations.length} Frelo Stationen geladen.`);
+                }
+            } catch (err) {
+                console.error("Fehler beim Laden der Nextbike API:", err);
+                showStatus("Frelo Stationen konnten nicht geladen werden.", "error");
+            }
+        }
 
-const compassIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/></svg>`;
+        // Geocoding via OpenStreetMap Nominatim (Kostenlos)
+        async function geocode(address) {
+            const query = encodeURIComponent(`${address}, Freiburg`);
+            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${query}&limit=1`);
+            const data = await res.json();
+            if (data && data.length > 0) {
+                return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+            }
+            return null;
+        }
 
-function renderResults(results, addresses){
-  const legsData = results.map(r => r.routes[0].legs[0]);
-  const durations = legsData.map(l => l.duration.value);
-  const distances = legsData.map(l => l.distance.value);
-  const totalDuration = durations.reduce((a,b)=>a+b,0);
-  const totalDistance = distances.reduce((a,b)=>a+b,0);
+        // GPS Standort holen
+        function handleGPSClick() {
+            if (navigator.geolocation) {
+                showStatus("Standort wird ermittelt...");
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                        startCoords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                        document.getElementById('start-input').value = "Aktueller Standort (GPS)";
+                        hideStatus();
+                    },
+                    (err) => {
+                        showStatus("GPS-Standort konnte nicht ermittelt werden.", "error");
+                    }
+                );
+            } else {
+                showStatus("GPS wird von diesem Browser nicht unterstützt.", "error");
+            }
+        }
 
-  const timeline = document.getElementById('timeline');
-  timeline.innerHTML = '';
-  durations.forEach((d,i) => {
-    const seg = document.createElement('div');
-    seg.className = `seg ${legColors[i]}`;
-    seg.style.width = `${(d/totalDuration*100).toFixed(1)}%`;
-    timeline.appendChild(seg);
-  });
+        // Haversine Formel zur Entfernungsberechnung (Luftlinie in km)
+        function getDistanceKm(coord1, coord2) {
+            const R = 6371;
+            const dLat = (coord2.lat - coord1.lat) * Math.PI / 180;
+            const dLng = (coord2.lng - coord1.lng) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(coord1.lat * Math.PI / 180) * Math.cos(coord2.lat * Math.PI / 180) *
+                      Math.sin(dLng/2) * Math.sin(dLng/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
 
-  const legsBox = document.getElementById('legs');
-  legsBox.innerHTML = '';
-  legsData.forEach((l, i) => {
-    const url = googleMapsUrl(addresses[i], addresses[i+1], legTravelMode[i]);
-    const div = document.createElement('div');
-    div.className = 'leg';
-    div.innerHTML = `
-      <div class="dot ${legColors[i]}"></div>
-      <div class="leg-body">
-        <div class="leg-title">${legLabels[i]}</div>
-        <div class="leg-detail">${fmtDistance(l.distance.value)} · ${fmtDuration(l.duration.value)}</div>
-        <a class="leg-open" href="${url}" target="_blank" rel="noopener">${compassIcon} In Google Maps öffnen</a>
-      </div>`;
-    legsBox.appendChild(div);
-  });
+        // Nächstgelegene Station finden
+        function findNearestStation(coords, type = 'bikes') {
+            let bestStation = null;
+            let minDistance = Infinity;
 
-  document.getElementById('total').innerHTML =
-    `<span>Gesamt</span><span>${fmtDistance(totalDistance)} · ${fmtDuration(totalDuration)}</span>`;
+            freloStations.forEach(st => {
+                // Bedingung: bikes > 0 (für Ausleihe) ODER free_racks > 0 (für Rückgabe)
+                const isAvailable = type === 'bikes' ? (st.bikes_available_to_rent > 0 || st.bikes > 0) : (st.free_racks > 0 || st.spot);
+                if (isAvailable) {
+                    const dist = getDistanceKm(coords, { lat: st.lat, lng: st.lng });
+                    if (dist < minDistance) {
+                        minDistance = dist;
+                        bestStation = st;
+                    }
+                }
+            });
 
-  document.getElementById('resultsBox').style.display = 'block';
+            return bestStation;
+        }
 
-  const hint = document.getElementById('mapsHint');
-  hint.textContent = 'Jeder Button öffnet die jeweilige Etappe mit Navigation in der Google Maps App (falls installiert), sonst im Browser. Da Google Maps keine App-übergreifende 3-Etappen-Route mit unterschiedlichen Verkehrsmitteln unterstützt, muss jede Etappe einzeln gestartet werden.';
-}
+        // OSRM Routing API Aufruf (Foot/Bike)
+        async function fetchOSRMRoute(start, end, profile = 'foot') {
+            const url = `https://router.project-osrm.org/route/v1/${profile}/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`;
+            const res = await fetch(url);
+            const data = await res.json();
+            if (data.routes && data.routes.length > 0) {
+                return data.routes[0];
+            }
+            return null;
+        }
 
-document.getElementById('loadKeyBtn').addEventListener('click', loadGoogleMaps);
-document.getElementById('calcBtn').addEventListener('click', calculateRoute);
-document.getElementById('apiKey').addEventListener('keydown', e => {
-  if(e.key === 'Enter') loadGoogleMaps();
-});
-</script>
+        // Haupt-Logik: Route Berechnen
+        async function handleRouteCalculation() {
+            const startVal = document.getElementById('start-input').value.trim();
+            const destVal = document.getElementById('dest-input').value.trim();
 
+            if (!destVal) {
+                showStatus("Bitte gib ein Ziel ein.", "error");
+                return;
+            }
+
+            showStatus("Berechne optimale Frelo-Route...");
+
+            // Startkoordinaten bestimmen
+            if (startVal !== "Aktueller Standort (GPS)" || !startCoords) {
+                startCoords = await geocode(startVal);
+            }
+
+            destCoords = await geocode(destVal);
+
+            if (!startCoords || !destCoords) {
+                showStatus("Start oder Ziel konnte nicht gefunden werden.", "error");
+                return;
+            }
+
+            if (freloStations.length === 0) {
+                await loadFreloStations();
+            }
+
+            // 1. Nächste freie Ausleihstation & Rückgabestation suchen
+            const stationA = findNearestStation(startCoords, 'bikes');
+            const stationB = findNearestStation(destCoords, 'racks');
+
+            if (!stationA || !stationB) {
+                showStatus("Keine passenden Frelo-Stationen gefunden.", "error");
+                return;
+            }
+
+            const stationACoords = { lat: stationA.lat, lng: stationA.lng };
+            const stationBCoords = { lat: stationB.lat, lng: stationB.lng };
+
+            // 2. 3 Routing-Segmente berechnen (OSRM)
+            const [route1, route2, route3] = await Promise.all([
+                fetchOSRMRoute(startCoords, stationACoords, 'foot'),
+                fetchOSRMRoute(stationACoords, stationBCoords, 'bike'),
+                fetchOSRMRoute(stationBCoords, destCoords, 'foot')
+            ]);
+
+            if (!route1 || !route2 || !route3) {
+                showStatus("Route konnte nicht berechnet werden.", "error");
+                return;
+            }
+
+            hideStatus();
+
+            // 3. Auf Karte zeichnen & UI aktualisieren
+            renderRoutesOnMap(startCoords, stationACoords, stationBCoords, destCoords, route1, route2, route3);
+            updateUI(stationA, stationB, route1, route2, route3, startCoords, stationACoords, stationBCoords, destCoords);
+        }
+
+        // Karte aktualisieren & Polylines zeichnen
+        function renderRoutesOnMap(start, stA, stB, end, r1, r2, r3) {
+            // Alte Layer entfernen
+            routeLayers.forEach(l => map.removeLayer(l));
+            routeLayers = [];
+
+            // Linie 1: Zu Fuß (Gepunktet / Blau)
+            const poly1 = L.geoJSON(r1.geometry, {
+                style: { color: '#007aff', weight: 5, dashArray: '8, 8' }
+            }).addTo(map);
+
+            // Linie 2: Radfahren (Durchgezogen / Grün)
+            const poly2 = L.geoJSON(r2.geometry, {
+                style: { color: '#34c759', weight: 6 }
+            }).addTo(map);
+
+            // Linie 3: Zu Fuß (Gepunktet / Blau)
+            const poly3 = L.geoJSON(r3.geometry, {
+                style: { color: '#007aff', weight: 5, dashArray: '8, 8' }
+            }).addTo(map);
+
+            // Marker erstellen
+            const mStart = L.marker([start.lat, start.lng]).bindPopup("<b>Start</b>").addTo(map);
+            const mStA = L.marker([stA.lat, stA.lng]).bindPopup("<b>Ausleihe:</b> Station A").addTo(map);
+            const mStB = L.marker([stB.lat, stB.lng]).bindPopup("<b>Rückgabe:</b> Station B").addTo(map);
+            const mEnd = L.marker([end.lat, end.lng]).bindPopup("<b>Ziel</b>").addTo(map);
+
+            routeLayers.push(poly1, poly2, poly3, mStart, mStA, mStB, mEnd);
+
+            // Karten-Blickfeld an Route anpassen
+            const bounds = L.featureGroup([poly1, poly2, poly3]).getBounds();
+            map.fitBounds(bounds, { padding: [30, 30] });
+        }
+
+        // UI-Karten & Google Maps Links füllen
+        function updateUI(stA, stB, r1, r2, r3, start, stACoords, stBCoords, end) {
+            const infoPanel = document.getElementById('info-panel');
+            infoPanel.style.display = 'block';
+
+            // Zeiten in Minuten umrechnen
+            const t1 = Math.round(r1.duration / 60);
+            const t2 = Math.round(r2.duration / 60);
+            const t3 = Math.round(r3.duration / 60);
+            const totalMin = t1 + t2 + t3;
+
+            const d1 = Math.round(r1.distance); // Meter
+            const d2 = (r2.distance / 1000).toFixed(1); // KM
+            const d3 = Math.round(r3.distance); // Meter
+            const totalKm = ((r1.distance + r2.distance + r3.distance) / 1000).toFixed(1);
+
+            document.getElementById('total-time').innerText = `~${totalMin} min`;
+            document.getElementById('total-dist').innerText = `${totalKm} km`;
+
+            // Details Etappe 1
+            document.getElementById('e1-dist').innerText = `${d1} m (${t1} min)`;
+            document.getElementById('station-a-name').innerText = stA.name;
+
+            // Details Etappe 2
+            document.getElementById('e2-dist').innerText = `${d2} km (${t2} min)`;
+            document.getElementById('e2-from').innerText = stA.name;
+            document.getElementById('e2-to').innerText = stB.name;
+            document.getElementById('station-a-bikes').innerText = stA.bikes_available_to_rent || stA.bikes || 0;
+
+            // Details Etappe 3
+            document.getElementById('e3-dist').innerText = `${d3} m (${t3} min)`;
+            document.getElementById('station-b-name').innerText = stB.name;
+            document.getElementById('station-b-racks').innerText = stB.free_racks || "Ja";
+
+            // Google Maps Links für jede Etappe setzen
+            document.getElementById('e1-nav-btn').href = `https://www.google.com/maps/dir/?api=1&origin=${start.lat},${start.lng}&destination=${stACoords.lat},${stACoords.lng}&travelmode=walking`;
+            document.getElementById('e2-nav-btn').href = `https://www.google.com/maps/dir/?api=1&origin=${stACoords.lat},${stACoords.lng}&destination=${stBCoords.lat},${stBCoords.lng}&travelmode=bicycling`;
+            document.getElementById('e3-nav-btn').href = `https://www.google.com/maps/dir/?api=1&origin=${stBCoords.lat},${stBCoords.lng}&destination=${end.lat},${end.lng}&travelmode=walking`;
+        }
+    </script>
 </body>
 </html>

@@ -358,14 +358,22 @@
         }
 
         // Frelo Stationen von der Nextbike API laden
+        // Frelo Stationen von der Nextbike API laden (Verbessert)
         async function loadFreloStations() {
             try {
                 const res = await fetch(`https://api.nextbike.net/maps/nextbike-live.json?city=${FREIBURG_CITY_ID}`);
                 const data = await res.json();
                 
-                if (data.countries && data.countries[0] && data.countries[0].cities[0]) {
-                    freloStations = data.countries[0].cities[0].places;
-                    console.log(`${freloStations.length} Frelo Stationen geladen.`);
+                if (data.countries) {
+                    // Wir suchen explizit nach der Freiburg-ID, egal wo sie im JSON steht
+                    for (let country of data.countries) {
+                        let city = country.cities.find(c => c.uid === FREIBURG_CITY_ID);
+                        if (city) {
+                            freloStations = city.places;
+                            console.log(`${freloStations.length} Frelo Stationen erfolgreich geladen.`);
+                            break;
+                        }
+                    }
                 }
             } catch (err) {
                 console.error("Fehler beim Laden der Nextbike API:", err);
@@ -416,13 +424,24 @@
         }
 
         // Nächstgelegene Station finden
+        // Nächstgelegene Station finden (Angepasst für Frelo Freiburg)
         function findNearestStation(coords, type = 'bikes') {
             let bestStation = null;
             let minDistance = Infinity;
-
+        
             freloStations.forEach(st => {
-                // Bedingung: bikes > 0 (für Ausleihe) ODER free_racks > 0 (für Rückgabe)
-                const isAvailable = type === 'bikes' ? (st.bikes_available_to_rent > 0 || st.bikes > 0) : (st.free_racks > 0 || st.spot);
+                let isAvailable = false;
+                
+                if (type === 'bikes') {
+                    // Für den Start: Es MUSS mindestens 1 Rad physisch da sein
+                    isAvailable = (st.bikes > 0);
+                } else {
+                    // Für das Ziel: Es muss lediglich eine offizielle Station sein (spot = true).
+                    // Frelo erlaubt die Rückgabe oft auch ohne leere "free_racks", solange man an der Station ist.
+                    isAvailable = (st.spot === true);
+                }
+        
+                // Wenn die Bedingung erfüllt ist, prüfen wir die Entfernung
                 if (isAvailable) {
                     const dist = getDistanceKm(coords, { lat: st.lat, lng: st.lng });
                     if (dist < minDistance) {
@@ -431,7 +450,7 @@
                     }
                 }
             });
-
+        
             return bestStation;
         }
 

@@ -501,32 +501,59 @@
             return null;
         }
 
-        // Echte Fuß- und Rad-Routen über BRouter (Kostenlos & ohne API-Key)
+        // Robuste Fuß- und Rad-Routenberechnung (BRouter + Proxy + Fallback)
         async function fetchRoute(start, end, profile = 'foot') {
-            // BRouter-Profile: 'foot-walking' für Fußgänger, 'trekking' für Fahrräder
+            // 1. Wenn Start und Ziel praktisch identisch sind (unter 30m)
+            const directDist = getDistanceKm(start, end) * 1000;
+            if (directDist < 30) {
+                return {
+                    geometry: {
+                        type: "LineString",
+                        coordinates: [[start.lng, start.lat], [end.lng, end.lat]]
+                    },
+                    distance: directDist,
+                    duration: Math.round(directDist / 1.2) // ~1.2 m/s Gehgeschwindigkeit
+                };
+            }
+        
             const brouterProfile = (profile === 'bike') ? 'trekking' : 'foot-walking';
+            const targetUrl = `https://brouter.de/brouter?lonlats=${start.lng},${start.lat}|${end.lng},${end.lat}&profile=${brouterProfile}&alternativeidx=0&format=geojson`;
             
-            const url = `https://brouter.de/brouter?lonlats=${start.lng},${start.lat}|${end.lng},${end.lat}&profile=${brouterProfile}&alternativeidx=0&format=geojson`;
-            
+            // Wir nutzen den Proxy, um Safari-CORS-Blockaden sicher zu umgehen
+            const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+        
             try {
-                const res = await fetch(url);
+                let res = await fetch(proxyUrl);
+                
+                // Falls Proxy kurz klemmt, direkten Abruf probieren
+                if (!res.ok) {
+                    res = await fetch(targetUrl);
+                }
+        
                 const data = await res.json();
                 
                 if (data.features && data.features.length > 0) {
-                    const feature = data.features[0];
+                    const feat = data.features[0];
                     return {
-                        geometry: feature.geometry,
-                        // Distanz in Metern
-                        distance: feature.properties['track-length'],
-                        // Zeit in Sekunden (BRouter liefert 'total-time' in s)
-                        duration: feature.properties['total-time']
+                        geometry: feat.geometry,
+                        distance: parseFloat(feat.properties['track-length'] || directDist),
+                        duration: parseFloat(feat.properties['total-time'] || (directDist / (profile === 'bike' ? 4.5 : 1.2)))
                     };
                 }
             } catch (err) {
-                console.error("Routing-Fehler:", err);
+                console.warn(`Fehler beim Routing (${profile}), nutze Luftlinien-Fallback:`, err);
             }
-            return null;
-        }
+
+    // Notfall-Fallback (Luftlinie), damit die App NIE komplett abbricht:
+    return {
+        geometry: {
+            type: "LineString",
+            coordinates: [[start.lng, start.lat], [end.lng, end.lat]]
+        },
+        distance: directDist,
+        duration: Math.round(directDist / (profile === 'bike' ? 4.2 : 1.3))
+    };
+}
                  
 
         // ===== Standort & Geometrie =====
@@ -584,96 +611,6 @@
                 }
             }
             return best;
-        }
-
-        // ===== Haupt-Logik =====
-        async function handleRouteCalculation() {
-            const btn = $("route-btn");
-            if (btn.disabled) return; // laufende Berechnung nicht doppelt starten
-
-            const startVal = $("start-input").value.trim();
-            const destVal = $("dest-input").value.trim();
-
-            if (!destVal) {
-                showStatus("Bitte gib ein Ziel ein.", "error");
-                return;
-            }
-            if (!usingGps && !startVal) {
-                showStatus("Bitte gib einen Start ein oder nutze GPS.", "error");
-                return;
-            }
-
-            const originalLabel = btn.innerText;
-            btn.disabled = true;
-            btn.innerText = "Berechne...";
-            showStatus("Berechne optimale Frelo-Route...");
-
-            try {
-                // 1. Start- und Zielkoordinaten bestimmen
-                if (!usingGps) startCoords = await geocode(startVal);
-                destCoords = await geocode(destVal);
-
-                if (!startCoords) {
-                    showStatus("Startadresse konnte nicht gefunden werden.", "error");
-                    return;
-                }
-                if (!destCoords) {
-                    showStatus("Zieladresse konnte nicht gefunden werden.", "error");
-                    return;
-                }
-
-                // 2. Stationsdaten sicherstellen
-                if (freloStations.length === 0 && !(await loadFreloStations())) {
-                    showStatus("Stationsdaten sind nicht verfügbar. Bitte später erneut versuchen.", "error");
-                    return;
-                }
-
-                // 3. Nächste Ausleih- und Rückgabestation suchen
-                const stationA = findNearestStation(startCoords, "rent");
-                const stationB = findNearestStation(destCoords, "return");
-
-                if (!stationA || !stationB) {
-                    showStatus("Keine passenden Frelo-Stationen gefunden.", "error");
-                    return;
-                }
-
-                const sameStation = stationA.uid === stationB.uid;
-                if (sameStation) {
-                    showStatus("Start und Ziel liegen an derselben Station – zu Fuß bist du vermutlich schneller.", "info");
-                }
-
-                const aCoords = { lat: stationA.lat, lng: stationA.lng };
-                const bCoords = { lat: stationB.lat, lng: stationB.lng };
-
-                // 4. Die drei Segmente parallel routen
-                const [route1, route2, route3] = await Promise.all([
-                    fetchRoute(startCoords, aCoords, "foot"),
-                    fetchRoute(aCoords, bCoords, "bike"),
-                    fetchRoute(bCoords, destCoords, "foot")
-                ]);
-
-                if (!route1 || !route2 || !route3) {
-                    showStatus("Route konnte nicht berechnet werden. Bitte erneut versuchen.", "error");
-                    return;
-                }
-
-                if (!sameStation) hideStatus();
-
-                // 5. Karte und Info-Panel aktualisieren
-                const coords = { start: startCoords, a: aCoords, b: bCoords, end: destCoords };
-                renderRoutesOnMap(coords, [route1, route2, route3]);
-                updateUI({
-                    stations: { a: stationA, b: stationB },
-                    routes: [route1, route2, route3],
-                    coords
-                });
-            } catch (err) {
-                console.error("Fehler bei der Routenberechnung:", err);
-                showStatus("Bei der Routenberechnung ist ein Fehler aufgetreten.", "error");
-            } finally {
-                btn.disabled = false;
-                btn.innerText = originalLabel;
-            }
         }
 
         // ===== Karten-Rendering =====

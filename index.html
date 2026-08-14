@@ -354,7 +354,11 @@
             bbox: { west: 7.72, south: 47.92, east: 7.95, north: 48.06 },
             walkSpeedKmh: 5,                    // realistische Geh-Geschwindigkeit
             bikeSpeedKmh: 15,                   // realistische Rad-Geschwindigkeit
-            minBikesToRent: 1
+            minBikesToRent: 1,
+            candidateLimit: 4,                  // wie viele Stationen pro Seite werden verglichen
+            // Umwegfaktoren: Luftlinie -> reale Strecke (grobe Schätzung für die Vorauswahl)
+            walkDetourFactor: 1.3,
+            bikeDetourFactor: 1.25
         };
 
         const EARTH_RADIUS_KM = 6371;
@@ -587,26 +591,72 @@
         // Anzahl aktuell ausleihbarer Räder einer Station.
         const rentableBikes = st => st.bikes_available_to_rent ?? st.bikes ?? 0;
 
-        // Nächstgelegene passende Station finden.
+        // Ist an dieser Station voraussichtlich ein Rückgabeplatz frei?
+        // Nutzt free_racks, wenn vorhanden; fällt sonst auf "ist offizielle Station" zurück,
+        // da manche Nextbike-Antworten dieses Feld nicht für jede Station liefern.
+        function hasFreeRack(st) {
+            if (typeof st.free_racks === "number") return st.free_racks > 0;
+            return Boolean(st.spot);
+        }
+
+        // Liefert die N nächstgelegenen, verfügbaren Stationen (nicht nur die eine nächste),
+        // sortiert nach Luftlinien-Distanz. Grundlage für die Kombinations-Suche unten.
         //   purpose "rent"   -> es muss mindestens ein ausleihbares Rad geben
-        //   purpose "return" -> es muss eine offizielle Station (spot) sein
-        function findNearestStation(coords, purpose) {
-            let best = null;
-            let minDistance = Infinity;
+        //   purpose "return" -> es muss ein freier Rückgabeplatz zu erwarten sein
+        function getCandidateStations(coords, purpose, limit = CONFIG.candidateLimit) {
+            const candidates = [];
 
             for (const st of freloStations) {
                 const available = purpose === "rent"
                     ? rentableBikes(st) >= CONFIG.minBikesToRent
-                    : Boolean(st.spot);
+                    : hasFreeRack(st);
 
                 if (!available) continue;
 
                 const dist = getDistanceKm(coords, { lat: st.lat, lng: st.lng });
-                if (dist < minDistance) {
-                    minDistance = dist;
-                    best = st;
+                candidates.push({ station: st, dist });
+            }
+
+            candidates.sort((a, b) => a.dist - b.dist);
+            return candidates.slice(0, limit);
+        }
+
+        // Grobe Zeitschätzung einer Etappen-Kombination (Luftlinie * Umwegfaktor).
+        // Dient nur der Vorauswahl unter den Kandidaten - für die tatsächliche Route
+        // wird später fetchRoute() mit dem BRouter-Service verwendet.
+        function estimateLegMinutes(a, b, detourFactor, speedKmh) {
+            const meters = getDistanceKm(a, b) * 1000 * detourFactor;
+            return estimateMinutes(meters, speedKmh);
+        }
+
+        // Prüft alle sinnvollen Kombinationen aus Ausleih- und Rückgabestation und
+        // gibt die Kombination mit der geringsten geschätzten Gesamtzeit zurück.
+        // So kann z.B. eine etwas weiter entfernte Ausleihstation gewinnen, wenn sie
+        // eine deutlich kürzere/schnellere Radstrecke zur Zielregion ermöglicht.
+        function findBestStationPair(startCoords, destCoords) {
+            const candidatesA = getCandidateStations(startCoords, "rent");
+            const candidatesB = getCandidateStations(destCoords, "return");
+
+            if (candidatesA.length === 0 || candidatesB.length === 0) return null;
+
+            let best = null;
+
+            for (const { station: stA } of candidatesA) {
+                for (const { station: stB } of candidatesB) {
+                    // Gleiche Station für Ausleihe und Rückgabe ergibt keine sinnvolle Radetappe
+                    if (stA.uid !== undefined && stA.uid === stB.uid) continue;
+
+                    const t1 = estimateLegMinutes(startCoords, { lat: stA.lat, lng: stA.lng }, CONFIG.walkDetourFactor, CONFIG.walkSpeedKmh);
+                    const t2 = estimateLegMinutes({ lat: stA.lat, lng: stA.lng }, { lat: stB.lat, lng: stB.lng }, CONFIG.bikeDetourFactor, CONFIG.bikeSpeedKmh);
+                    const t3 = estimateLegMinutes({ lat: stB.lat, lng: stB.lng }, destCoords, CONFIG.walkDetourFactor, CONFIG.walkSpeedKmh);
+                    const total = t1 + t2 + t3;
+
+                    if (!best || total < best.total) {
+                        best = { stationA: stA, stationB: stB, total };
+                    }
                 }
             }
+
             return best;
         }
 
@@ -653,15 +703,19 @@
                     await loadFreloStations();
                 }
 
-                // 2. Stationen filtern
-                const stationA = findNearestStation(startCoords, "rent");
-                const stationB = findNearestStation(destCoords, "return");
+                // 2. Beste Stationskombination ermitteln (nicht einfach die jeweils
+                //    nächstgelegene Station pro Seite, sondern die Kombination mit der
+                //    geringsten geschätzten Gesamtzeit über alle drei Etappen)
+                const bestPair = findBestStationPair(startCoords, destCoords);
 
-                if (!stationA || !stationB) {
+                if (!bestPair) {
                     showStatus("Keine passenden Frelo-Stationen gefunden.", "error");
                     routeBtn.disabled = false;
                     return;
                 }
+
+                const stationA = bestPair.stationA;
+                const stationB = bestPair.stationB;
 
                 const coords = {
                     start: startCoords,

@@ -501,23 +501,33 @@
             return null;
         }
 
-        // OSRM-Route für ein Segment (foot/bike) abrufen.
-        async function fetchOSRMRoute(start, end, profile = "foot") {
-            const url = `${ENDPOINTS.osrm}/${profile}/` +
-                `${start.lng},${start.lat};${end.lng},${end.lat}` +
-                `?overview=full&geometries=geojson`;
+        // Echte Fuß- und Rad-Routen über BRouter (Kostenlos & ohne API-Key)
+        async function fetchRoute(start, end, profile = 'foot') {
+            // BRouter-Profile: 'foot-walking' für Fußgänger, 'trekking' für Fahrräder
+            const brouterProfile = (profile === 'bike') ? 'trekking' : 'foot-walking';
+            
+            const url = `https://brouter.de/brouter?lonlats=${start.lng},${start.lat}|${end.lng},${end.lat}&profile=${brouterProfile}&alternativeidx=0&format=geojson`;
+            
             try {
                 const res = await fetch(url);
-                if (!res.ok) return null;
                 const data = await res.json();
-                if (data.routes && data.routes.length > 0) {
-                    return data.routes[0];
+                
+                if (data.features && data.features.length > 0) {
+                    const feature = data.features[0];
+                    return {
+                        geometry: feature.geometry,
+                        // Distanz in Metern
+                        distance: feature.properties['track-length'],
+                        // Zeit in Sekunden (BRouter liefert 'total-time' in s)
+                        duration: feature.properties['total-time']
+                    };
                 }
             } catch (err) {
-                console.error("OSRM-Fehler:", err);
+                console.error("Routing-Fehler:", err);
             }
             return null;
         }
+                 
 
         // ===== Standort & Geometrie =====
 
@@ -637,9 +647,9 @@
 
                 // 4. Die drei Segmente parallel routen
                 const [route1, route2, route3] = await Promise.all([
-                    fetchOSRMRoute(startCoords, aCoords, "foot"),
-                    fetchOSRMRoute(aCoords, bCoords, "bike"),
-                    fetchOSRMRoute(bCoords, destCoords, "foot")
+                    fetchRoute(startCoords, aCoords, "foot"),
+                    fetchRoute(aCoords, bCoords, "bike"),
+                    fetchRoute(bCoords, destCoords, "foot")
                 ]);
 
                 if (!route1 || !route2 || !route3) {

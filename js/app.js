@@ -1,6 +1,6 @@
 "use strict";
 
-// Freie Routing- & Karten-Engine: BRouter (Routing), OSM Nominatim (Geocoding),
+// Freie Routing- & Karten-Engine: OSRM/BRouter (Routing), OSM Nominatim (Geocoding),
 // Nextbike Live-API (Frelo-Stationen). Alle Dienste sind kostenlos/öffentlich.
 
 // ===== Konfiguration =====
@@ -13,10 +13,16 @@ const CONFIG = {
     walkSpeedKmh: 5,                    // realistische Geh-Geschwindigkeit
     bikeSpeedKmh: 15,                   // realistische Rad-Geschwindigkeit
     minBikesToRent: 1,
-    candidateLimit: 4,                  // wie viele Stationen pro Seite werden verglichen
-    // Umwegfaktoren: Luftlinie -> reale Strecke (grobe Schätzung für die Vorauswahl)
-    walkDetourFactor: 1.3,
-    bikeDetourFactor: 1.25
+    candidateLimit: 3,                  // so viele Stationen je Seite werden echt geroutet
+    // Umwegfaktoren: Luftlinie -> reale Strecke. Nur noch Notnagel, falls kein
+    // Routing-Dienst erreichbar ist.
+    walkDetourFactor: 1.35,
+    bikeDetourFactor: 1.25,
+    requestTimeoutMs: 6000,
+    maxParallelRequests: 4,             // öffentliche Routing-Server drosseln Bursts
+    providerCooldownMs: 60000,          // nach einem Ausfall Dienst kurz überspringen
+    // 1 genügt: osrmRoute versucht es bei Drosselung intern bereits ein zweites Mal
+    providerFailLimit: 1
 };
 
 const EARTH_RADIUS_KM = 6371;
@@ -24,7 +30,29 @@ const GPS_LABEL = "Aktueller Standort (GPS)";
 
 const ENDPOINTS = {
     nextbike: cityId => `https://maps.nextbike.net/maps/nextbike-live.json?city=${cityId}`,
-    nominatim: "https://nominatim.openstreetmap.org/search"
+    nominatim: "https://nominatim.openstreetmap.org/search",
+    // FOSSGIS-OSRM: eigene Instanzen je Verkehrsmittel, CORS ist freigegeben.
+    // Der Pfadbestandteil "driving" ist bei OSRM fix, entscheidend ist routed-<profil>.
+    osrm: osrmProfile => `https://routing.openstreetmap.de/routed-${osrmProfile}`,
+    brouter: "https://brouter.de/brouter"
+};
+
+// Profil-Definitionen: OSRM ist der Primärdienst, BRouter der Fallback.
+// Wichtig: BRouter kennt KEIN "foot-fastest" (liefert HTTP 500) - für Fußwege
+// ist "hiking-beta" das korrekte Profil.
+const PROFILES = {
+    foot: {
+        osrm: "foot",
+        brouter: "hiking-beta",
+        speedKmh: CONFIG.walkSpeedKmh,
+        detour: CONFIG.walkDetourFactor
+    },
+    bike: {
+        osrm: "bike",
+        brouter: "trekking",
+        speedKmh: CONFIG.bikeSpeedKmh,
+        detour: CONFIG.bikeDetourFactor
+    }
 };
 
 // Die Nextbike-Live-API sendet CORS-Header, daher zuerst der Direktabruf.
@@ -56,6 +84,13 @@ const gmapsDir = (from, to, mode) =>
 
 const estimateMinutes = (distanceMeters, speedKmh) =>
     Math.max(1, Math.round((distanceMeters / 1000) / speedKmh * 60));
+
+// Dauer einer Etappe in Minuten: bevorzugt die vom Routing-Dienst gelieferte
+// Fahrzeit, sonst aus der Distanz hochgerechnet.
+const legMinutes = (route, speedKmh) =>
+    Number.isFinite(route.duration) && route.duration > 0
+        ? Math.max(1, Math.round(route.duration / 60))
+        : estimateMinutes(route.distance, speedKmh);
 
 function showStatus(msg, type = "info") {
     const el = $("status");
@@ -161,59 +196,189 @@ async function geocode(address) {
     return null;
 }
 
-// Robuste Fuß- und Rad-Routenberechnung (BRouter + Proxy + Fallback)
-async function fetchRoute(start, end, profile = 'foot') {
-    // Wenn Start und Ziel praktisch identisch sind (unter 30m), lohnt sich kein Routing-Call
-    const directDist = getDistanceKm(start, end) * 1000;
-    if (directDist < 30) {
-        return {
-            geometry: {
-                type: "LineString",
-                coordinates: [[start.lng, start.lat], [end.lng, end.lat]]
-            },
-            distance: directDist,
-            duration: Math.round(directDist / 1.2) // ~1.2 m/s Gehgeschwindigkeit
-        };
-    }
-
-    const brouterProfile = (profile === 'bike') ? 'trekking' : 'foot-fastest';
-    const targetUrl = `https://brouter.de/brouter?lonlats=${start.lng},${start.lat}|${end.lng},${end.lat}&profile=${brouterProfile}&alternativeidx=0&format=geojson`;
-
-    // Wir nutzen den Proxy, um Browser-CORS-Blockaden sicher zu umgehen
-    const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`;
-
+// fetch mit hartem Timeout - ein hängender Dienst darf die Route nicht blockieren.
+async function fetchWithTimeout(url, timeoutMs = CONFIG.requestTimeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        let res = await fetch(proxyUrl);
-
-        // Falls Proxy kurz klemmt, direkten Abruf probieren
-        if (!res.ok) {
-            res = await fetch(targetUrl);
-        }
-
-        const data = await res.json();
-
-        if (data.features && data.features.length > 0) {
-            const feat = data.features[0];
-            return {
-                geometry: feat.geometry,
-                distance: parseFloat(feat.properties['track-length'] || directDist),
-                duration: parseFloat(feat.properties['total-time'] || (directDist / (profile === 'bike' ? 4.5 : 1.2)))
-            };
-        }
-    } catch (err) {
-        console.warn(`Fehler beim Routing (${profile}), nutze Luftlinien-Fallback:`, err);
+        return await fetch(url, { signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
     }
+}
 
-    // Notfall-Fallback (Luftlinie), damit die App NIE komplett abbricht:
+// Die öffentlichen Routing-Server drosseln Anfrage-Bursts (HTTP 429).
+// Deshalb laufen nie mehr als CONFIG.maxParallelRequests Abrufe gleichzeitig.
+let activeRequests = 0;
+const requestQueue = [];
+
+function withRequestSlot(task) {
+    return new Promise((resolve, reject) => {
+        const run = async () => {
+            activeRequests++;
+            try {
+                resolve(await task());
+            } catch (err) {
+                reject(err);
+            } finally {
+                activeRequests--;
+                const next = requestQueue.shift();
+                if (next) next();
+            }
+        };
+
+        if (activeRequests < CONFIG.maxParallelRequests) run();
+        else requestQueue.push(run);
+    });
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Luftlinien-Notfallroute: Distanz wird mit dem Umwegfaktor beaufschlagt, damit
+// die Anzeige nicht systematisch zu kurz ist. `estimated` markiert sie als Schätzung.
+function beelineRoute(start, end, profileKey) {
+    const p = PROFILES[profileKey];
+    const meters = getDistanceKm(start, end) * 1000 * p.detour;
     return {
         geometry: {
             type: "LineString",
             coordinates: [[start.lng, start.lat], [end.lng, end.lat]]
         },
-        distance: directDist,
-        duration: Math.round(directDist / (profile === 'bike' ? 4.2 : 1.3))
+        distance: meters,
+        duration: (meters / 1000) / p.speedKmh * 3600,
+        estimated: true
     };
 }
+
+// OSRM (FOSSGIS): echtes Fußgänger- bzw. Radnetz, liefert Geometrie + Fahrzeit.
+async function osrmRoute(start, end, profileKey) {
+    const base = ENDPOINTS.osrm(PROFILES[profileKey].osrm);
+    const coords = `${start.lng},${start.lat};${end.lng},${end.lat}`;
+    const url = `${base}/route/v1/driving/${coords}?overview=full&geometries=geojson&alternatives=false&steps=false`;
+
+    let res = await withRequestSlot(() => fetchWithTimeout(url));
+
+    // Bei Drosselung einmal kurz warten und erneut versuchen
+    if (res.status === 429) {
+        await sleep(600);
+        res = await withRequestSlot(() => fetchWithTimeout(url));
+    }
+    if (!res.ok) throw new Error(`OSRM HTTP ${res.status}`);
+
+    const data = await res.json();
+    const route = data.code === "Ok" && data.routes && data.routes[0];
+    if (!route || !route.geometry) throw new Error("OSRM ohne Route");
+
+    return {
+        geometry: route.geometry,
+        distance: route.distance,   // Meter
+        duration: route.duration,   // Sekunden
+        estimated: false
+    };
+}
+
+// BRouter als Zweitmeinung. Sendet selbst CORS-Header, daher erst direkt,
+// nur im Notfall über den öffentlichen Proxy.
+async function brouterRoute(start, end, profileKey) {
+    const target = `${ENDPOINTS.brouter}?lonlats=${start.lng},${start.lat}|${end.lng},${end.lat}` +
+        `&profile=${PROFILES[profileKey].brouter}&alternativeidx=0&format=geojson`;
+    const urls = [target, `https://corsproxy.io/?url=${encodeURIComponent(target)}`];
+
+    let lastErr;
+    for (const url of urls) {
+        try {
+            const res = await withRequestSlot(() => fetchWithTimeout(url));
+            if (!res.ok) throw new Error(`BRouter HTTP ${res.status}`);
+
+            const data = await res.json();
+            const feat = data.features && data.features[0];
+            const trackLength = feat && parseFloat(feat.properties["track-length"]);
+            if (!feat || !Number.isFinite(trackLength)) throw new Error("BRouter ohne Route");
+
+            const totalTime = parseFloat(feat.properties["total-time"]);
+            return {
+                geometry: feat.geometry,
+                distance: trackLength,
+                duration: Number.isFinite(totalTime)
+                    ? totalTime
+                    : (trackLength / 1000) / PROFILES[profileKey].speedKmh * 3600,
+                estimated: false
+            };
+        } catch (err) {
+            lastErr = err;
+        }
+    }
+    throw lastErr;
+}
+
+// Einfacher Circuit-Breaker je Routing-Dienst: Ist ein Server down oder drosselt
+// er uns, würde sonst jede einzelne Etappe erneut ins Timeout laufen.
+const providerHealth = new Map();
+
+function providerState(provider) {
+    if (!providerHealth.has(provider)) {
+        providerHealth.set(provider, { failures: 0, coldUntil: 0 });
+    }
+    return providerHealth.get(provider);
+}
+
+const isProviderCold = provider => Date.now() < providerState(provider).coldUntil;
+
+function noteProviderFailure(provider) {
+    const state = providerState(provider);
+    state.failures++;
+    if (state.failures >= CONFIG.providerFailLimit) {
+        state.coldUntil = Date.now() + CONFIG.providerCooldownMs;
+        state.failures = 0;
+        console.warn(`${provider.name} wird für ${CONFIG.providerCooldownMs / 1000}s übersprungen.`);
+    }
+}
+
+function noteProviderSuccess(provider) {
+    providerHealth.set(provider, { failures: 0, coldUntil: 0 });
+}
+
+// Ergebnis-Cache: dieselbe Etappe (z.B. eine Station, die bei mehreren
+// Berechnungen als Kandidat auftaucht) wird nicht erneut abgefragt.
+const routeCache = new Map();
+const routeKey = (start, end, profileKey) =>
+    `${profileKey}:${start.lat.toFixed(5)},${start.lng.toFixed(5)}` +
+    `>${end.lat.toFixed(5)},${end.lng.toFixed(5)}`;
+
+// Robuste Fuß- und Rad-Routenberechnung: OSRM -> BRouter -> Luftlinie.
+async function fetchRoute(start, end, profileKey = "foot") {
+    // Start und Ziel praktisch identisch: kein Routing-Call nötig.
+    if (getDistanceKm(start, end) * 1000 < 25) {
+        const r = beelineRoute(start, end, profileKey);
+        r.estimated = false;
+        return r;
+    }
+
+    const key = routeKey(start, end, profileKey);
+    if (routeCache.has(key)) return routeCache.get(key);
+
+    for (const provider of [osrmRoute, brouterRoute]) {
+        // Ist der Dienst gerade nicht erreichbar, nicht bei jeder Etappe erneut
+        // ins Timeout laufen - das hat die Berechnung sonst um Minuten verzögert.
+        if (isProviderCold(provider)) continue;
+
+        try {
+            const route = await provider(start, end, profileKey);
+            noteProviderSuccess(provider);
+            routeCache.set(key, route);
+            return route;
+        } catch (err) {
+            noteProviderFailure(provider);
+            console.warn(`Routing über ${provider.name} fehlgeschlagen (${profileKey}):`, err);
+        }
+    }
+
+    // Schätzungen werden bewusst NICHT gecacht - beim nächsten Versuch soll
+    // wieder ein echter Routing-Dienst zum Zug kommen.
+    console.warn(`Kein Routing-Dienst erreichbar (${profileKey}) - Luftlinien-Schätzung.`);
+    return beelineRoute(start, end, profileKey);
+}
+
 
 // ===== Standort & Geometrie =====
 
@@ -249,13 +414,18 @@ function getDistanceKm(a, b) {
 // Anzahl aktuell ausleihbarer Räder einer Station.
 const rentableBikes = st => st.bikes_available_to_rent ?? st.bikes ?? 0;
 
-// Ist an dieser Station voraussichtlich ein Rückgabeplatz frei?
-// Nutzt free_racks, wenn vorhanden; fällt sonst auf "ist offizielle Station" zurück,
-// da manche Nextbike-Antworten dieses Feld nicht für jede Station liefern.
-function hasFreeRack(st) {
-    if (typeof st.free_racks === "number") return st.free_racks > 0;
-    return Boolean(st.spot);
-}
+// Echte Frelo-Station? Die Nextbike-Antwort enthält neben den Stationen auch
+// frei abgestellte Einzelräder (spot=false, Name "BIKE 123456") - die sind
+// weder Leih- noch Rückgabeort im stationsbasierten Frelo-System.
+const isStation = st => st.spot === true && st.active_place === 1;
+
+// Ist an dieser Station eine Rückgabe möglich?
+// Wichtig: free_racks===0 bedeutet bei Frelo NICHT "voll". Die meisten Stationen
+// sind Schilder-Stationen (terminal_type "sign") mit weniger Bügeln als Rädern -
+// im Live-Feed melden ~35% der Stationen free_racks=0, obwohl dort problemlos
+// zurückgegeben werden kann. Die alte free_racks>0-Prüfung hat diese Stationen
+// aussortiert und dadurch unnötig lange Fußwege zum Ziel erzwungen.
+const canReturnBike = st => isStation(st);
 
 // Liefert die N nächstgelegenen, verfügbaren Stationen (nicht nur die eine nächste),
 // sortiert nach Luftlinien-Distanz. Grundlage für die Kombinations-Suche unten.
@@ -265,9 +435,11 @@ function getCandidateStations(coords, purpose, limit = CONFIG.candidateLimit) {
     const candidates = [];
 
     for (const st of freloStations) {
+        if (!isStation(st)) continue;
+
         const available = purpose === "rent"
             ? rentableBikes(st) >= CONFIG.minBikesToRent
-            : hasFreeRack(st);
+            : canReturnBike(st);
 
         if (!available) continue;
 
@@ -279,41 +451,66 @@ function getCandidateStations(coords, purpose, limit = CONFIG.candidateLimit) {
     return candidates.slice(0, limit);
 }
 
-// Grobe Zeitschätzung einer Etappen-Kombination (Luftlinie * Umwegfaktor).
-// Dient nur der Vorauswahl unter den Kandidaten - für die tatsächliche Route
-// wird später fetchRoute() mit dem BRouter-Service verwendet.
-function estimateLegMinutes(a, b, detourFactor, speedKmh) {
-    const meters = getDistanceKm(a, b) * 1000 * detourFactor;
-    return estimateMinutes(meters, speedKmh);
+const stationPoint = st => ({ lat: st.lat, lng: st.lng });
+
+// Luftlinien-Schätzung in Sekunden (Notnagel, wenn die Matrix nicht antwortet).
+function estimateSeconds(a, b, profileKey) {
+    const p = PROFILES[profileKey];
+    const km = getDistanceKm(a, b) * p.detour;
+    return km / p.speedKmh * 3600;
 }
 
 // Prüft alle sinnvollen Kombinationen aus Ausleih- und Rückgabestation und
-// gibt die Kombination mit der geringsten geschätzten Gesamtzeit zurück.
-// So kann z.B. eine etwas weiter entfernte Ausleihstation gewinnen, wenn sie
-// eine deutlich kürzere/schnellere Radstrecke zur Zielregion ermöglicht.
-function findBestStationPair(startCoords, destCoords) {
-    const candidatesA = getCandidateStations(startCoords, "rent");
-    const candidatesB = getCandidateStations(destCoords, "return");
+// gibt die beste zurück - samt der bereits berechneten Fußwege, damit die
+// Etappen 1 und 3 nicht ein zweites Mal geroutet werden müssen.
+//
+// Entscheidend: die Fußwege werden hier ECHT geroutet (OSRM-Fußgängernetz),
+// nicht mehr per Luftlinie geschätzt. Dadurch verliert eine Station, die zwar
+// nah liegt, aber nur über einen langen Umweg (Bahndamm, Dreisam, Sackgasse)
+// erreichbar ist, gegen eine etwas entferntere mit direktem Fußweg.
+// Die Radetappe wird für die Vorauswahl weiterhin geschätzt; für das gewählte
+// Paar wird sie danach exakt geroutet.
+async function findBestStationPair(startCoords, destCoords) {
+    const candA = getCandidateStations(startCoords, "rent");
+    const candB = getCandidateStations(destCoords, "return");
 
-    if (candidatesA.length === 0 || candidatesB.length === 0) return null;
+    if (candA.length === 0 || candB.length === 0) return null;
+
+    // Erste Etappe als Probe einzeln routen: dadurch ist der Zustand der
+    // Routing-Dienste bekannt, bevor der Rest parallel abgefragt wird. Ist ein
+    // Dienst down, laufen so nicht alle Kandidaten gleichzeitig ins Timeout.
+    const probe = await fetchRoute(startCoords, stationPoint(candA[0].station), "foot");
+
+    // Restliche Kandidaten-Fußwege parallel (beide Richtungen korrekt herum)
+    const [restA, footB] = await Promise.all([
+        Promise.all(candA.slice(1).map(c => fetchRoute(startCoords, stationPoint(c.station), "foot"))),
+        Promise.all(candB.map(c => fetchRoute(stationPoint(c.station), destCoords, "foot")))
+    ]);
+    const footA = [probe, ...restA];
 
     let best = null;
 
-    for (const { station: stA } of candidatesA) {
-        for (const { station: stB } of candidatesB) {
+    candA.forEach((a, i) => {
+        candB.forEach((b, j) => {
             // Gleiche Station für Ausleihe und Rückgabe ergibt keine sinnvolle Radetappe
-            if (stA.uid !== undefined && stA.uid === stB.uid) continue;
+            if (a.station.uid !== undefined && a.station.uid === b.station.uid) return;
 
-            const t1 = estimateLegMinutes(startCoords, { lat: stA.lat, lng: stA.lng }, CONFIG.walkDetourFactor, CONFIG.walkSpeedKmh);
-            const t2 = estimateLegMinutes({ lat: stA.lat, lng: stA.lng }, { lat: stB.lat, lng: stB.lng }, CONFIG.bikeDetourFactor, CONFIG.bikeSpeedKmh);
-            const t3 = estimateLegMinutes({ lat: stB.lat, lng: stB.lng }, destCoords, CONFIG.walkDetourFactor, CONFIG.walkSpeedKmh);
-            const total = t1 + t2 + t3;
+            const bikeSeconds = estimateSeconds(
+                stationPoint(a.station), stationPoint(b.station), "bike"
+            );
+            const total = footA[i].duration + bikeSeconds + footB[j].duration;
 
             if (!best || total < best.total) {
-                best = { stationA: stA, stationB: stB, total };
+                best = {
+                    stationA: a.station,
+                    stationB: b.station,
+                    footRouteA: footA[i],
+                    footRouteB: footB[j],
+                    total
+                };
             }
-        }
-    }
+        });
+    });
 
     return best;
 }
@@ -361,10 +558,10 @@ async function handleRouteCalculation() {
             await loadFreloStations();
         }
 
-        // 2. Beste Stationskombination ermitteln (nicht einfach die jeweils
+        // 2. Beste Stationskombination ermitteln - nicht einfach die per Luftlinie
         //    nächstgelegene Station pro Seite, sondern die Kombination mit der
-        //    geringsten geschätzten Gesamtzeit über alle drei Etappen)
-        const bestPair = findBestStationPair(startCoords, destCoords);
+        //    kürzesten Gesamtzeit auf Basis echt gerouteter Fußwege.
+        const bestPair = await findBestStationPair(startCoords, destCoords);
 
         if (!bestPair) {
             showStatus("Keine passenden Frelo-Stationen gefunden.", "error");
@@ -382,14 +579,21 @@ async function handleRouteCalculation() {
             end: destCoords
         };
 
-        // 3. Routen parallel abrufen (Fuß, Rad, Fuß)
-        const routes = await Promise.all([
-            fetchRoute(coords.start, coords.a, 'foot'),
-            fetchRoute(coords.a, coords.b, 'bike'),
-            fetchRoute(coords.b, coords.end, 'foot')
-        ]);
+        // 3. Die beiden Fußwege wurden bei der Stationswahl bereits geroutet,
+        //    es fehlt nur noch die Radetappe.
+        const routes = [
+            bestPair.footRouteA,
+            await fetchRoute(coords.a, coords.b, "bike"),
+            bestPair.footRouteB
+        ];
 
-        hideStatus();
+        // Warnen, wenn eine Etappe nur geschätzt werden konnte
+        if (routes.some(r => r.estimated)) {
+            showStatus("Hinweis: Für mindestens eine Etappe war kein Routing-Dienst erreichbar – " +
+                "diese Angaben sind Luftlinien-Schätzungen.", "warn");
+        } else {
+            hideStatus();
+        }
 
         // 4. Zeichnen und UI aktualisieren
         renderRoutesOnMap(coords, routes);
@@ -455,10 +659,11 @@ function updateUI({ stations, routes, coords }) {
 
     $("info-panel").style.display = "block";
 
-    // Geschätzte Zeiten (aus der Distanz, da BRouter nur Fußzeiten liefert)
-    const t1 = estimateMinutes(r1.distance, CONFIG.walkSpeedKmh);
-    const t2 = estimateMinutes(r2.distance, CONFIG.bikeSpeedKmh);
-    const t3 = estimateMinutes(r3.distance, CONFIG.walkSpeedKmh);
+    // Zeiten kommen jetzt direkt vom Routing-Dienst (inkl. Steigungen bei BRouter);
+    // nur wenn keine Fahrzeit geliefert wurde, wird aus der Distanz hochgerechnet.
+    const t1 = legMinutes(r1, CONFIG.walkSpeedKmh);
+    const t2 = legMinutes(r2, CONFIG.bikeSpeedKmh);
+    const t3 = legMinutes(r3, CONFIG.walkSpeedKmh);
 
     const d1 = Math.round(r1.distance);                 // Meter
     const d2 = (r2.distance / 1000).toFixed(1);         // km

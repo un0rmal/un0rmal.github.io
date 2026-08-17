@@ -209,6 +209,11 @@ button.secondary {
     color: #0288d1;
 }
 
+.status-msg.warn {
+    background-color: #fff4e5;
+    color: #b26a00;
+}
+
 /* Custom Marker Icons */
 .leaflet-div-icon {
     background: transparent;

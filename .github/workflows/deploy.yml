@@ -1,0 +1,65 @@
+name: Deploy static site to Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Prepare static site
+        run: |
+          mkdir -p _site
+          cp -r index.html css js _site/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - name: Deploy attempt 1
+        id: deploy_1
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      - name: Deploy attempt 2
+        id: deploy_2
+        if: steps.deploy_1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      - name: Deploy attempt 3
+        id: deploy_3
+        if: steps.deploy_1.outcome == 'failure' && steps.deploy_2.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      - name: Fail if all deploy attempts failed
+        if: steps.deploy_1.outcome == 'failure' && (steps.deploy_2.outcome == 'failure' || steps.deploy_2.outcome == 'skipped') && (steps.deploy_3.outcome == 'failure' || steps.deploy_3.outcome == 'skipped')
+        run: |
+          echo "All deployment attempts failed" >&2
+          exit 1

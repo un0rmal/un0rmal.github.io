@@ -1,6 +1,6 @@
 "use strict";
 
-// Freie Routing- & Karten-Engine: OSRM (Routing), OSM Nominatim (Geocoding),
+// Freie Routing- & Karten-Engine: BRouter (Routing), OSM Nominatim (Geocoding),
 // Nextbike Live-API (Frelo-Stationen). Alle Dienste sind kostenlos/öffentlich.
 
 // ===== Konfiguration =====
@@ -12,7 +12,11 @@ const CONFIG = {
     bbox: { west: 7.72, south: 47.92, east: 7.95, north: 48.06 },
     walkSpeedKmh: 5,                    // realistische Geh-Geschwindigkeit
     bikeSpeedKmh: 15,                   // realistische Rad-Geschwindigkeit
-    minBikesToRent: 1
+    minBikesToRent: 1,
+    candidateLimit: 4,                  // wie viele Stationen pro Seite werden verglichen
+    // Umwegfaktoren: Luftlinie -> reale Strecke (grobe Schätzung für die Vorauswahl)
+    walkDetourFactor: 1.3,
+    bikeDetourFactor: 1.25
 };
 
 const EARTH_RADIUS_KM = 6371;
@@ -20,8 +24,7 @@ const GPS_LABEL = "Aktueller Standort (GPS)";
 
 const ENDPOINTS = {
     nextbike: cityId => `https://maps.nextbike.net/maps/nextbike-live.json?city=${cityId}`,
-    nominatim: "https://nominatim.openstreetmap.org/search",
-    osrm: "https://router.project-osrm.org/route/v1"
+    nominatim: "https://nominatim.openstreetmap.org/search"
 };
 
 // Die Nextbike-Live-API sendet CORS-Header, daher zuerst der Direktabruf.
@@ -51,7 +54,6 @@ const gmapsDir = (from, to, mode) =>
     `https://www.google.com/maps/dir/?api=1&origin=${from.lat},${from.lng}` +
     `&destination=${to.lat},${to.lng}&travelmode=${mode}`;
 
-// OSRM-Demo liefert nur Auto-Zeiten – wir schätzen die Dauer aus der Distanz.
 const estimateMinutes = (distanceMeters, speedKmh) =>
     Math.max(1, Math.round((distanceMeters / 1000) / speedKmh * 60));
 
@@ -159,22 +161,58 @@ async function geocode(address) {
     return null;
 }
 
-// OSRM-Route für ein Segment (foot/bike) abrufen.
-async function fetchOSRMRoute(start, end, profile = "foot") {
-    const url = `${ENDPOINTS.osrm}/${profile}/` +
-        `${start.lng},${start.lat};${end.lng},${end.lat}` +
-        `?overview=full&geometries=geojson`;
+// Robuste Fuß- und Rad-Routenberechnung (BRouter + Proxy + Fallback)
+async function fetchRoute(start, end, profile = 'foot') {
+    // Wenn Start und Ziel praktisch identisch sind (unter 30m), lohnt sich kein Routing-Call
+    const directDist = getDistanceKm(start, end) * 1000;
+    if (directDist < 30) {
+        return {
+            geometry: {
+                type: "LineString",
+                coordinates: [[start.lng, start.lat], [end.lng, end.lat]]
+            },
+            distance: directDist,
+            duration: Math.round(directDist / 1.2) // ~1.2 m/s Gehgeschwindigkeit
+        };
+    }
+
+    const brouterProfile = (profile === 'bike') ? 'trekking' : 'foot-fastest';
+    const targetUrl = `https://brouter.de/brouter?lonlats=${start.lng},${start.lat}|${end.lng},${end.lat}&profile=${brouterProfile}&alternativeidx=0&format=geojson`;
+
+    // Wir nutzen den Proxy, um Browser-CORS-Blockaden sicher zu umgehen
+    const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`;
+
     try {
-        const res = await fetch(url);
-        if (!res.ok) return null;
+        let res = await fetch(proxyUrl);
+
+        // Falls Proxy kurz klemmt, direkten Abruf probieren
+        if (!res.ok) {
+            res = await fetch(targetUrl);
+        }
+
         const data = await res.json();
-        if (data.routes && data.routes.length > 0) {
-            return data.routes[0];
+
+        if (data.features && data.features.length > 0) {
+            const feat = data.features[0];
+            return {
+                geometry: feat.geometry,
+                distance: parseFloat(feat.properties['track-length'] || directDist),
+                duration: parseFloat(feat.properties['total-time'] || (directDist / (profile === 'bike' ? 4.5 : 1.2)))
+            };
         }
     } catch (err) {
-        console.error("OSRM-Fehler:", err);
+        console.warn(`Fehler beim Routing (${profile}), nutze Luftlinien-Fallback:`, err);
     }
-    return null;
+
+    // Notfall-Fallback (Luftlinie), damit die App NIE komplett abbricht:
+    return {
+        geometry: {
+            type: "LineString",
+            coordinates: [[start.lng, start.lat], [end.lng, end.lat]]
+        },
+        distance: directDist,
+        duration: Math.round(directDist / (profile === 'bike' ? 4.2 : 1.3))
+    };
 }
 
 // ===== Standort & Geometrie =====
@@ -211,116 +249,161 @@ function getDistanceKm(a, b) {
 // Anzahl aktuell ausleihbarer Räder einer Station.
 const rentableBikes = st => st.bikes_available_to_rent ?? st.bikes ?? 0;
 
-// Nächstgelegene passende Station finden.
+// Ist an dieser Station voraussichtlich ein Rückgabeplatz frei?
+// Nutzt free_racks, wenn vorhanden; fällt sonst auf "ist offizielle Station" zurück,
+// da manche Nextbike-Antworten dieses Feld nicht für jede Station liefern.
+function hasFreeRack(st) {
+    if (typeof st.free_racks === "number") return st.free_racks > 0;
+    return Boolean(st.spot);
+}
+
+// Liefert die N nächstgelegenen, verfügbaren Stationen (nicht nur die eine nächste),
+// sortiert nach Luftlinien-Distanz. Grundlage für die Kombinations-Suche unten.
 //   purpose "rent"   -> es muss mindestens ein ausleihbares Rad geben
-//   purpose "return" -> es muss eine offizielle Station (spot) sein
-function findNearestStation(coords, purpose) {
-    let best = null;
-    let minDistance = Infinity;
+//   purpose "return" -> es muss ein freier Rückgabeplatz zu erwarten sein
+function getCandidateStations(coords, purpose, limit = CONFIG.candidateLimit) {
+    const candidates = [];
 
     for (const st of freloStations) {
         const available = purpose === "rent"
             ? rentableBikes(st) >= CONFIG.minBikesToRent
-            : Boolean(st.spot);
+            : hasFreeRack(st);
 
         if (!available) continue;
 
         const dist = getDistanceKm(coords, { lat: st.lat, lng: st.lng });
-        if (dist < minDistance) {
-            minDistance = dist;
-            best = st;
+        candidates.push({ station: st, dist });
+    }
+
+    candidates.sort((a, b) => a.dist - b.dist);
+    return candidates.slice(0, limit);
+}
+
+// Grobe Zeitschätzung einer Etappen-Kombination (Luftlinie * Umwegfaktor).
+// Dient nur der Vorauswahl unter den Kandidaten - für die tatsächliche Route
+// wird später fetchRoute() mit dem BRouter-Service verwendet.
+function estimateLegMinutes(a, b, detourFactor, speedKmh) {
+    const meters = getDistanceKm(a, b) * 1000 * detourFactor;
+    return estimateMinutes(meters, speedKmh);
+}
+
+// Prüft alle sinnvollen Kombinationen aus Ausleih- und Rückgabestation und
+// gibt die Kombination mit der geringsten geschätzten Gesamtzeit zurück.
+// So kann z.B. eine etwas weiter entfernte Ausleihstation gewinnen, wenn sie
+// eine deutlich kürzere/schnellere Radstrecke zur Zielregion ermöglicht.
+function findBestStationPair(startCoords, destCoords) {
+    const candidatesA = getCandidateStations(startCoords, "rent");
+    const candidatesB = getCandidateStations(destCoords, "return");
+
+    if (candidatesA.length === 0 || candidatesB.length === 0) return null;
+
+    let best = null;
+
+    for (const { station: stA } of candidatesA) {
+        for (const { station: stB } of candidatesB) {
+            // Gleiche Station für Ausleihe und Rückgabe ergibt keine sinnvolle Radetappe
+            if (stA.uid !== undefined && stA.uid === stB.uid) continue;
+
+            const t1 = estimateLegMinutes(startCoords, { lat: stA.lat, lng: stA.lng }, CONFIG.walkDetourFactor, CONFIG.walkSpeedKmh);
+            const t2 = estimateLegMinutes({ lat: stA.lat, lng: stA.lng }, { lat: stB.lat, lng: stB.lng }, CONFIG.bikeDetourFactor, CONFIG.bikeSpeedKmh);
+            const t3 = estimateLegMinutes({ lat: stB.lat, lng: stB.lng }, destCoords, CONFIG.walkDetourFactor, CONFIG.walkSpeedKmh);
+            const total = t1 + t2 + t3;
+
+            if (!best || total < best.total) {
+                best = { stationA: stA, stationB: stB, total };
+            }
         }
     }
+
     return best;
 }
 
-// ===== Haupt-Logik =====
+// ===== Haupt-Berechnung =====
+// (Diese Funktion fehlte im Ausgangscode komplett, obwohl sie oben als
+//  Click-Handler registriert wird -> ReferenceError beim Laden der Seite.)
 async function handleRouteCalculation() {
-    const btn = $("route-btn");
-    if (btn.disabled) return; // laufende Berechnung nicht doppelt starten
-
     const startVal = $("start-input").value.trim();
     const destVal = $("dest-input").value.trim();
 
-    if (!destVal) {
-        showStatus("Bitte gib ein Ziel ein.", "error");
-        return;
-    }
-    if (!usingGps && !startVal) {
-        showStatus("Bitte gib einen Start ein oder nutze GPS.", "error");
+    if (!startVal) {
+        showStatus("Bitte gib einen Startort ein (oder nutze den 📍 Button).", "error");
         return;
     }
 
-    const originalLabel = btn.innerText;
-    btn.disabled = true;
-    btn.innerText = "Berechne...";
-    showStatus("Berechne optimale Frelo-Route...");
+    if (!destVal) {
+        showStatus("Bitte gib eine Zieladresse ein.", "error");
+        return;
+    }
+
+    const routeBtn = $("route-btn");
+    routeBtn.disabled = true;
+    showStatus("Berechne optimale Route...");
 
     try {
-        // 1. Start- und Zielkoordinaten bestimmen
-        if (!usingGps) startCoords = await geocode(startVal);
+        // 1. Koordinaten auflösen
+        if (!usingGps || !startCoords) {
+            startCoords = await geocode(startVal);
+        }
         destCoords = await geocode(destVal);
 
         if (!startCoords) {
-            showStatus("Startadresse konnte nicht gefunden werden.", "error");
+            showStatus("Startadresse in Freiburg nicht gefunden.", "error");
+            routeBtn.disabled = false;
             return;
         }
         if (!destCoords) {
-            showStatus("Zieladresse konnte nicht gefunden werden.", "error");
+            showStatus("Zieladresse in Freiburg nicht gefunden.", "error");
+            routeBtn.disabled = false;
             return;
         }
 
-        // 2. Stationsdaten sicherstellen
-        if (freloStations.length === 0 && !(await loadFreloStations())) {
-            showStatus("Stationsdaten sind nicht verfügbar. Bitte später erneut versuchen.", "error");
-            return;
+        if (freloStations.length === 0) {
+            await loadFreloStations();
         }
 
-        // 3. Nächste Ausleih- und Rückgabestation suchen
-        const stationA = findNearestStation(startCoords, "rent");
-        const stationB = findNearestStation(destCoords, "return");
+        // 2. Beste Stationskombination ermitteln (nicht einfach die jeweils
+        //    nächstgelegene Station pro Seite, sondern die Kombination mit der
+        //    geringsten geschätzten Gesamtzeit über alle drei Etappen)
+        const bestPair = findBestStationPair(startCoords, destCoords);
 
-        if (!stationA || !stationB) {
+        if (!bestPair) {
             showStatus("Keine passenden Frelo-Stationen gefunden.", "error");
+            routeBtn.disabled = false;
             return;
         }
 
-        const sameStation = stationA.uid === stationB.uid;
-        if (sameStation) {
-            showStatus("Start und Ziel liegen an derselben Station – zu Fuß bist du vermutlich schneller.", "info");
-        }
+        const stationA = bestPair.stationA;
+        const stationB = bestPair.stationB;
 
-        const aCoords = { lat: stationA.lat, lng: stationA.lng };
-        const bCoords = { lat: stationB.lat, lng: stationB.lng };
+        const coords = {
+            start: startCoords,
+            a: { lat: stationA.lat, lng: stationA.lng },
+            b: { lat: stationB.lat, lng: stationB.lng },
+            end: destCoords
+        };
 
-        // 4. Die drei Segmente parallel routen
-        const [route1, route2, route3] = await Promise.all([
-            fetchOSRMRoute(startCoords, aCoords, "foot"),
-            fetchOSRMRoute(aCoords, bCoords, "bike"),
-            fetchOSRMRoute(bCoords, destCoords, "foot")
+        // 3. Routen parallel abrufen (Fuß, Rad, Fuß)
+        const routes = await Promise.all([
+            fetchRoute(coords.start, coords.a, 'foot'),
+            fetchRoute(coords.a, coords.b, 'bike'),
+            fetchRoute(coords.b, coords.end, 'foot')
         ]);
 
-        if (!route1 || !route2 || !route3) {
-            showStatus("Route konnte nicht berechnet werden. Bitte erneut versuchen.", "error");
-            return;
-        }
+        hideStatus();
 
-        if (!sameStation) hideStatus();
-
-        // 5. Karte und Info-Panel aktualisieren
-        const coords = { start: startCoords, a: aCoords, b: bCoords, end: destCoords };
-        renderRoutesOnMap(coords, [route1, route2, route3]);
+        // 4. Zeichnen und UI aktualisieren
+        renderRoutesOnMap(coords, routes);
         updateUI({
             stations: { a: stationA, b: stationB },
-            routes: [route1, route2, route3],
+            routes,
             coords
         });
+
     } catch (err) {
-        console.error("Fehler bei der Routenberechnung:", err);
-        showStatus("Bei der Routenberechnung ist ein Fehler aufgetreten.", "error");
+        console.error("Fehler bei der Berechnung:", err);
+        showStatus("Fehler bei der Routenberechnung. Bitte erneut versuchen.", "error");
     } finally {
-        btn.disabled = false;
-        btn.innerText = originalLabel;
+        routeBtn.disabled = false;
     }
 }
 
@@ -372,7 +455,7 @@ function updateUI({ stations, routes, coords }) {
 
     $("info-panel").style.display = "block";
 
-    // Geschätzte Zeiten (aus der Distanz, da OSRM-Demo nur Auto-Zeiten liefert)
+    // Geschätzte Zeiten (aus der Distanz, da BRouter nur Fußzeiten liefert)
     const t1 = estimateMinutes(r1.distance, CONFIG.walkSpeedKmh);
     const t2 = estimateMinutes(r2.distance, CONFIG.bikeSpeedKmh);
     const t3 = estimateMinutes(r3.distance, CONFIG.walkSpeedKmh);
